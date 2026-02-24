@@ -1,0 +1,19 @@
+# virtual environment
+venv/
+venv/*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+
+
+# results
+results/
+
+# pnl
+pnl-show_graph-output/
