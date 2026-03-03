@@ -302,7 +302,7 @@ def train_value_on_trajectory(value_net, trajectory, target_literal, lambda_deca
 # ============================================================================
 
 def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, lambda_decay=0.9,
-                     value_method='goal_prob', max_steps=100, log_interval=10, verbose=True):
+                     value_method='goal_prob', max_steps=100, log_interval=10, capture_interval=50, verbose=True):
     """
     Train policy and value networks using online TD(lambda) with soft labels.
 
@@ -316,6 +316,7 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
         value_method: str - 'goal_prob' or 'entropy'
         max_steps: int - maximum steps per episode
         log_interval: int - how often to log statistics
+        capture_interval: int - how often to capture weights and compute test metrics
         verbose: bool - whether to print progress
 
     Returns:
@@ -333,6 +334,12 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
 
     # Tracking metrics
     episode_lengths = []
+    success_rates = []
+    avg_lengths = []
+    captured_episodes = []
+    policy_losses = []
+    value_losses = []
+
     success_count = 0
     total_episodes = 0
 
@@ -356,6 +363,27 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
         train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_decay, num_vars)
         train_value_on_trajectory(value_net, trajectory, target_literal, lambda_decay, num_vars, value_method)
 
+        # Capture metrics at intervals
+        if (episode + 1) % capture_interval == 0:
+            captured_episodes.append(episode + 1)
+
+            # Compute success rate over all episodes so far
+            current_success_rate = success_count / total_episodes
+            success_rates.append(current_success_rate)
+
+            # Compute average length over recent episodes
+            recent_window = min(capture_interval, len(episode_lengths))
+            current_avg_length = np.mean(episode_lengths[-recent_window:])
+            avg_lengths.append(current_avg_length)
+
+            # Capture policy network loss
+            policy_loss = policy_net.test_loss()
+            policy_losses.append(policy_loss)
+
+            # Capture value network loss
+            value_loss = value_net.test_loss()
+            value_losses.append(value_loss)
+
         # Log progress
         if verbose and (episode + 1) % log_interval == 0:
             recent_successes = success_count
@@ -368,16 +396,164 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
                   f"Avg Length: {avg_length:.1f} | "
                   f"Last: {len(trajectory)} steps, {'SUCCESS' if reached_goal else 'FAILED'}")
 
+    # Capture final weight matrices
+    final_policy_matrices = {
+        'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+        'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
+        'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
+    }
+    final_value_matrices = {
+        'source_to_hidden': value_net.source_to_hidden.matrix.base.copy(),
+        'target_to_hidden': value_net.target_to_hidden.matrix.base.copy(),
+        'hidden_to_output': value_net.hidden_to_output.matrix.base.copy()
+    }
+
     # Compute final statistics
     stats = {
         'episode_lengths': episode_lengths,
         'success_rate': success_count / total_episodes,
         'avg_episode_length': np.mean(episode_lengths),
         'total_episodes': total_episodes,
-        'successful_episodes': success_count
+        'successful_episodes': success_count,
+        'captured_episodes': captured_episodes,
+        'success_rates': success_rates,
+        'avg_lengths': avg_lengths,
+        'policy_losses': policy_losses,
+        'value_losses': value_losses,
+        'final_policy_matrices': final_policy_matrices,
+        'final_value_matrices': final_value_matrices
     }
 
     return stats
+
+
+# ============================================================================
+# Results Saving and Plotting
+# ============================================================================
+
+def save_results(stats, experiment_name, save_dir='results/on_policy'):
+    """
+    Save training statistics and final weight matrices to disk.
+
+    Args:
+        stats: dict - statistics returned from train_td_lambda
+        experiment_name: str - name for this experiment (e.g., 'impgraph_10v_15c_lambda0.9')
+        save_dir: str - directory to save results
+    """
+    # Create directories
+    os.makedirs(f'{save_dir}/metrics', exist_ok=True)
+    os.makedirs(f'{save_dir}/final_weights/{experiment_name}', exist_ok=True)
+    os.makedirs(f'{save_dir}/plots', exist_ok=True)
+
+    # Save success rates
+    with open(f'{save_dir}/metrics/{experiment_name}_success_rates.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'success_rate'])
+        for episode, rate in zip(stats['captured_episodes'], stats['success_rates']):
+            writer.writerow([episode, rate])
+
+    # Save average episode lengths
+    with open(f'{save_dir}/metrics/{experiment_name}_avg_lengths.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'avg_length'])
+        for episode, length in zip(stats['captured_episodes'], stats['avg_lengths']):
+            writer.writerow([episode, length])
+
+    # Save policy losses
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'loss'])
+        for episode, loss in zip(stats['captured_episodes'], stats['policy_losses']):
+            writer.writerow([episode, loss])
+
+    # Save value losses
+    with open(f'{save_dir}/metrics/{experiment_name}_value_losses.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'loss'])
+        for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
+            writer.writerow([episode, loss])
+
+    # Save all episode lengths
+    with open(f'{save_dir}/metrics/{experiment_name}_all_episode_lengths.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'length'])
+        for episode, length in enumerate(stats['episode_lengths'], 1):
+            writer.writerow([episode, length])
+
+    # Save final policy weight matrices
+    np.save(f'{save_dir}/final_weights/{experiment_name}/policy_source_to_hidden.npy',
+            stats['final_policy_matrices']['source_to_hidden'])
+    np.save(f'{save_dir}/final_weights/{experiment_name}/policy_target_to_hidden.npy',
+            stats['final_policy_matrices']['target_to_hidden'])
+    np.save(f'{save_dir}/final_weights/{experiment_name}/policy_hidden_to_output.npy',
+            stats['final_policy_matrices']['hidden_to_output'])
+
+    # Save final value weight matrices
+    np.save(f'{save_dir}/final_weights/{experiment_name}/value_source_to_hidden.npy',
+            stats['final_value_matrices']['source_to_hidden'])
+    np.save(f'{save_dir}/final_weights/{experiment_name}/value_target_to_hidden.npy',
+            stats['final_value_matrices']['target_to_hidden'])
+    np.save(f'{save_dir}/final_weights/{experiment_name}/value_hidden_to_output.npy',
+            stats['final_value_matrices']['hidden_to_output'])
+
+    print(f"\nResults saved to {save_dir}/")
+    print(f"  - Metrics: {save_dir}/metrics/{experiment_name}_*.csv")
+    print(f"  - Final weights: {save_dir}/final_weights/{experiment_name}/")
+
+
+def plot_training_curves(stats, experiment_name, save_dir='results/on_policy', show=False):
+    """
+    Plot and save training curves (success rate, episode length, losses).
+
+    Args:
+        stats: dict - statistics returned from train_td_lambda
+        experiment_name: str - name for this experiment
+        save_dir: str - directory to save plots
+        show: bool - whether to display plots (default False, just save)
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Success rate
+    axes[0, 0].plot(stats['captured_episodes'], stats['success_rates'], 'b-', linewidth=2)
+    axes[0, 0].set_xlabel('Episode')
+    axes[0, 0].set_ylabel('Success Rate')
+    axes[0, 0].set_title('Success Rate over Training')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].set_ylim([0, 1.05])
+
+    # Average episode length
+    axes[0, 1].plot(stats['captured_episodes'], stats['avg_lengths'], 'g-', linewidth=2)
+    axes[0, 1].set_xlabel('Episode')
+    axes[0, 1].set_ylabel('Average Episode Length')
+    axes[0, 1].set_title('Average Episode Length over Training')
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # Policy loss
+    axes[1, 0].plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
+    axes[1, 0].set_xlabel('Episode')
+    axes[1, 0].set_ylabel('Policy Loss (MSE)')
+    axes[1, 0].set_title('Policy Network Loss over Training')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Value loss
+    axes[1, 1].plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
+    axes[1, 1].set_xlabel('Episode')
+    axes[1, 1].set_ylabel('Value Loss (MSE)')
+    axes[1, 1].set_title('Value Network Loss over Training')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Save plot
+    os.makedirs(f'{save_dir}/plots', exist_ok=True)
+    plot_path = f'{save_dir}/plots/{experiment_name}_training_curves.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"  - Training curves plot: {plot_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
 
 # ============================================================================
@@ -386,8 +562,8 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
 
 if __name__ == "__main__":
     # Implication graph parameters
-    num_vars = 10
-    num_clauses = 15
+    num_vars = 8
+    num_clauses = 10
 
     # Generate the implication graph
     graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
@@ -399,6 +575,9 @@ if __name__ == "__main__":
     # TD(lambda) hyperparameters
     lambda_decay = 0.9
     value_method = 'goal_prob'  # or 'entropy'
+
+    # Create experiment name
+    experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_lambda{lambda_decay}'
 
     # Create networks
     policy_net = PolicyNetwork(
@@ -433,6 +612,7 @@ if __name__ == "__main__":
         value_method=value_method,
         max_steps=50,
         log_interval=10,
+        capture_interval=50,
         verbose=True
     )
 
@@ -443,3 +623,9 @@ if __name__ == "__main__":
     print(f"Total Episodes: {stats['total_episodes']}")
     print(f"Successful Episodes: {stats['successful_episodes']}")
     print("="*60)
+
+    # Save results
+    save_results(stats, experiment_name)
+
+    # Plot training curves
+    plot_training_curves(stats, experiment_name)
