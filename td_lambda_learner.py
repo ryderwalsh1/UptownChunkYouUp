@@ -1,6 +1,7 @@
 import numpy as np
 import random
 import warnings
+import pickle
 import gen_impgraph
 from lambda_labels import lambda_labels
 from policy_network import PolicyNetwork
@@ -10,6 +11,71 @@ import csv
 import os
 
 warnings.filterwarnings("ignore", category=UserWarning, module='psyneulink')
+
+
+# ============================================================================
+# Graph and Weight Loading Functions
+# ============================================================================
+
+def load_graph(graph_path):
+    """
+    Load a saved implication graph from a pickle file.
+
+    Args:
+        graph_path: str - path to the .pkl file containing the graph
+
+    Returns:
+        networkx.DiGraph - the loaded implication graph
+    """
+    with open(graph_path, 'rb') as f:
+        graph = pickle.load(f)
+    return graph
+
+
+def load_weights_into_network(network, weights_dir, network_type='policy'):
+    """
+    Load pre-trained weights into a PolicyNetwork or ValueNetwork.
+
+    Args:
+        network: PolicyNetwork or ValueNetwork - the network to load weights into
+        weights_dir: str - directory containing the weight .npy files
+        network_type: str - 'policy' or 'value' (used for naming)
+
+    Expected files in weights_dir:
+        - source_to_hidden/epoch_{N}.npy (or policy_source_to_hidden.npy)
+        - target_to_hidden/epoch_{N}.npy (or policy_target_to_hidden.npy)
+        - hidden_to_output/epoch_{N}.npy (or policy_hidden_to_output.npy)
+    """
+    # Try to load from subdirectories first (mlp_basic_learner.py format)
+    source_to_hidden_path = os.path.join(weights_dir, 'source_to_hidden')
+    target_to_hidden_path = os.path.join(weights_dir, 'target_to_hidden')
+    hidden_to_output_path = os.path.join(weights_dir, 'hidden_to_output')
+
+    if os.path.isdir(source_to_hidden_path):
+        # Load from subdirectories (find the latest epoch)
+        source_files = sorted([f for f in os.listdir(source_to_hidden_path) if f.endswith('.npy')])
+        target_files = sorted([f for f in os.listdir(target_to_hidden_path) if f.endswith('.npy')])
+        output_files = sorted([f for f in os.listdir(hidden_to_output_path) if f.endswith('.npy')])
+
+        if not source_files or not target_files or not output_files:
+            raise ValueError(f"No weight files found in {weights_dir}")
+
+        # Use the last (most recent) epoch
+        source_matrix = np.load(os.path.join(source_to_hidden_path, source_files[-1]))
+        target_matrix = np.load(os.path.join(target_to_hidden_path, target_files[-1]))
+        output_matrix = np.load(os.path.join(hidden_to_output_path, output_files[-1]))
+    else:
+        # Load from flat directory (td_lambda_learner.py format)
+        source_matrix = np.load(os.path.join(weights_dir, f'{network_type}_source_to_hidden.npy'))
+        target_matrix = np.load(os.path.join(weights_dir, f'{network_type}_target_to_hidden.npy'))
+        output_matrix = np.load(os.path.join(weights_dir, f'{network_type}_hidden_to_output.npy'))
+
+    # Load weights into the network
+    network.source_to_hidden.matrix.base[:] = source_matrix
+    network.target_to_hidden.matrix.base[:] = target_matrix
+    network.hidden_to_output.matrix.base[:] = output_matrix
+
+    print(f"Loaded weights into {network_type} network from {weights_dir}")
 
 
 # ============================================================================
@@ -561,12 +627,23 @@ def plot_training_curves(stats, experiment_name, save_dir='results/on_policy', s
 # ============================================================================
 
 if __name__ == "__main__":
+    # ========================================================================
+    # Configuration
+    # ========================================================================
+
     # Implication graph parameters
     num_vars = 8
     num_clauses = 10
 
-    # Generate the implication graph
-    graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
+    # Option 1: Load an existing graph
+    # Uncomment the following lines to load a saved graph:
+    graph_path = 'results/graphs/impgraph_8v_10c/graph.pkl'
+    graph = load_graph(graph_path)
+    print(f"Loaded graph from {graph_path}")
+
+    # Option 2: Generate a new graph
+    # graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
+    # print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # Network hyperparameters
     hidden_size = 20
@@ -595,6 +672,13 @@ if __name__ == "__main__":
         hidden_size=hidden_size,
         learning_rate=learning_rate
     )
+
+    # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
+    # Uncomment to load weights:
+    # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_10v_15c'
+    # load_weights_into_network(policy_net, policy_weights_dir, network_type='policy')
+    # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_10v_15c'
+    # load_weights_into_network(value_net, value_weights_dir, network_type='value')
 
     print(f"Training TD(λ) with λ={lambda_decay}, value_method={value_method}")
     print(f"Graph: {num_vars} vars, {num_clauses} clauses")
