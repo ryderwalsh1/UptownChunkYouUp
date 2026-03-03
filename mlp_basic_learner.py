@@ -7,15 +7,15 @@ import os
 import matplotlib.pyplot as plt
 
 # Implication graph parameters
-num_vars = 8
-num_clauses = 10
+num_vars = 16
+num_clauses = 20
 
 # Generate the implication graph
 graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
 
 # MLP hyperparameters
 hidden_size = 25
-learning_rate = 0.60
+learning_rate = 0.85
 
 # Create experiment name and directories
 experiment_name = f'impgraph_{num_vars}v_{num_clauses}c'
@@ -67,7 +67,7 @@ print(f"  Total examples: {len(composition.training_sources)}")
 
 capture_interval = 5
 
-losses, learning_matrices = composition.learn(epochs=500,capture_interval=capture_interval,on_policy=False)
+losses, learning_matrices = composition.learn(epochs=600,capture_interval=capture_interval,on_policy=False)
 
 
 # Save losses to csv
