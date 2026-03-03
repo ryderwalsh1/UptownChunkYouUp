@@ -32,7 +32,7 @@ def load_graph(graph_path):
     return graph
 
 
-def load_weights_into_network(network, weights_dir, network_type='policy'):
+def load_weights_into_network(network, weights_dir, network_type='policy', epoch=None):
     """
     Load pre-trained weights into a PolicyNetwork or ValueNetwork.
 
@@ -40,6 +40,7 @@ def load_weights_into_network(network, weights_dir, network_type='policy'):
         network: PolicyNetwork or ValueNetwork - the network to load weights into
         weights_dir: str - directory containing the weight .npy files
         network_type: str - 'policy' or 'value' (used for naming)
+        epoch: int or None - specific epoch to load (None = latest epoch)
 
     Expected files in weights_dir:
         - source_to_hidden/epoch_{N}.npy (or policy_source_to_hidden.npy)
@@ -52,23 +53,50 @@ def load_weights_into_network(network, weights_dir, network_type='policy'):
     hidden_to_output_path = os.path.join(weights_dir, 'hidden_to_output')
 
     if os.path.isdir(source_to_hidden_path):
-        # Load from subdirectories (find the latest epoch)
-        source_files = sorted([f for f in os.listdir(source_to_hidden_path) if f.endswith('.npy')])
-        target_files = sorted([f for f in os.listdir(target_to_hidden_path) if f.endswith('.npy')])
-        output_files = sorted([f for f in os.listdir(hidden_to_output_path) if f.endswith('.npy')])
+        # Load from subdirectories
+        if epoch is not None:
+            # Load specific epoch
+            source_file = f'epoch_{epoch}.npy'
+            target_file = f'epoch_{epoch}.npy'
+            output_file = f'epoch_{epoch}.npy'
 
-        if not source_files or not target_files or not output_files:
-            raise ValueError(f"No weight files found in {weights_dir}")
+            source_path = os.path.join(source_to_hidden_path, source_file)
+            target_path = os.path.join(target_to_hidden_path, target_file)
+            output_path = os.path.join(hidden_to_output_path, output_file)
 
-        # Use the last (most recent) epoch
-        source_matrix = np.load(os.path.join(source_to_hidden_path, source_files[-1]))
-        target_matrix = np.load(os.path.join(target_to_hidden_path, target_files[-1]))
-        output_matrix = np.load(os.path.join(hidden_to_output_path, output_files[-1]))
+            if not os.path.exists(source_path):
+                raise ValueError(f"Epoch {epoch} not found in {weights_dir}")
+
+            source_matrix = np.load(source_path)
+            target_matrix = np.load(target_path)
+            output_matrix = np.load(output_path)
+            print(f"Loaded weights from epoch {epoch}")
+        else:
+            # Load latest epoch
+            source_files = sorted([f for f in os.listdir(source_to_hidden_path) if f.endswith('.npy')])
+            target_files = sorted([f for f in os.listdir(target_to_hidden_path) if f.endswith('.npy')])
+            output_files = sorted([f for f in os.listdir(hidden_to_output_path) if f.endswith('.npy')])
+
+            if not source_files or not target_files or not output_files:
+                raise ValueError(f"No weight files found in {weights_dir}")
+
+            # Use the last (most recent) epoch
+            source_matrix = np.load(os.path.join(source_to_hidden_path, source_files[-1]))
+            target_matrix = np.load(os.path.join(target_to_hidden_path, target_files[-1]))
+            output_matrix = np.load(os.path.join(hidden_to_output_path, output_files[-1]))
+
+            # Extract epoch number from filename
+            latest_epoch = source_files[-1].replace('epoch_', '').replace('.npy', '')
+            print(f"Loaded weights from latest epoch ({latest_epoch})")
     else:
         # Load from flat directory (td_lambda_learner.py format)
+        if epoch is not None:
+            print(f"Warning: epoch parameter ignored for flat directory format")
+
         source_matrix = np.load(os.path.join(weights_dir, f'{network_type}_source_to_hidden.npy'))
         target_matrix = np.load(os.path.join(weights_dir, f'{network_type}_target_to_hidden.npy'))
         output_matrix = np.load(os.path.join(weights_dir, f'{network_type}_hidden_to_output.npy'))
+        print(f"Loaded final weights")
 
     # Load weights into the network
     network.source_to_hidden.matrix.base[:] = source_matrix
@@ -675,9 +703,9 @@ if __name__ == "__main__":
 
     # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
     # Uncomment to load weights:
-    # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_10v_15c'
-    # load_weights_into_network(policy_net, policy_weights_dir, network_type='policy')
-    # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_10v_15c'
+    policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
+    load_weights_into_network(policy_net, policy_weights_dir, network_type='policy')
+    # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
     # load_weights_into_network(value_net, value_weights_dir, network_type='value')
 
     print(f"Training TD(λ) with λ={lambda_decay}, value_method={value_method}")
