@@ -308,7 +308,7 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 # Training Functions
 # ============================================================================
 
-def train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_decay, num_vars, pad_id=0):
+def train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_decay, num_vars):
     """
     Train policy network on a completed trajectory using lambda-weighted soft labels.
 
@@ -318,14 +318,13 @@ def train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_de
         target_literal: int - goal literal
         lambda_decay: float - lambda parameter for TD(lambda)
         num_vars: int - number of variables
-        pad_id: int - padding token ID (default 0, will map to literal 1)
     """
     # Convert trajectory to token indices
     token_trajectory = [literal_to_token_idx(lit, num_vars) for lit in trajectory]
 
     # Compute lambda labels
     vocab_size = 2 * num_vars
-    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay, pad_id=pad_id)
+    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay)
 
     # Target encoding (constant throughout trajectory)
     target_idx = literal_to_token_idx(target_literal, num_vars)
@@ -347,7 +346,7 @@ def train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_de
 
 
 def train_value_on_trajectory(value_net, trajectory, target_literal, lambda_decay, num_vars,
-                                value_method='goal_prob', pad_id=0):
+                                value_method='goal_prob'):
     """
     Train value network on a completed trajectory using lambda-weighted soft labels.
 
@@ -358,14 +357,13 @@ def train_value_on_trajectory(value_net, trajectory, target_literal, lambda_deca
         lambda_decay: float - lambda parameter for TD(lambda)
         num_vars: int - number of variables
         value_method: str - 'goal_prob' or 'entropy' for extracting scalar value from distribution
-        pad_id: int - padding token ID
     """
     # Convert trajectory to token indices
     token_trajectory = [literal_to_token_idx(lit, num_vars) for lit in trajectory]
 
     # Compute lambda labels
     vocab_size = 2 * num_vars
-    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay, pad_id=pad_id)
+    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay)
 
     # Target encoding (constant throughout trajectory)
     target_idx = literal_to_token_idx(target_literal, num_vars)
@@ -674,7 +672,7 @@ if __name__ == "__main__":
     # print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # Network hyperparameters
-    hidden_size = 20
+    hidden_size = 25
     learning_rate = 0.5
 
     # TD(lambda) hyperparameters
@@ -719,7 +717,7 @@ if __name__ == "__main__":
         value_net=value_net,
         graph=graph,
         num_vars=num_vars,
-        num_episodes=500,
+        num_episodes=100,
         lambda_decay=lambda_decay,
         value_method=value_method,
         max_steps=50,
