@@ -378,6 +378,27 @@ class ValueNetwork():
         )
         return prediction.flatten()[0]  # Return scalar value
 
+    def update_single(self, source_encoding, target_encoding, value_target):
+        """
+        Perform a single learning update for one (state, goal, target) tuple.
+
+        Args:
+            source_encoding: np.array - one-hot encoding of current state
+            target_encoding: np.array - one-hot encoding of goal state
+            value_target: float or np.array - scalar value target
+        """
+        # Ensure value_target is in array form
+        if isinstance(value_target, (int, float)):
+            value_target = np.array([value_target])
+
+        self.value.learn(
+            inputs={
+                self.value_source_input: [source_encoding],
+                self.value_target_input: [target_encoding],
+                self.target_node: [value_target]
+            }
+        )
+
     def _mse(self, predicted, actual):
         # Calculate the squared differences
         squared_errors = np.square(actual - predicted)

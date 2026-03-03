@@ -598,6 +598,23 @@ class PolicyNetwork():
         )
         return prediction
     
+    def update_single(self, source_encoding, target_encoding, policy_target):
+        """
+        Perform a single learning update for one (state, goal, target) tuple.
+
+        Args:
+            source_encoding: np.array - one-hot encoding of current state
+            target_encoding: np.array - one-hot encoding of goal state
+            policy_target: np.array - soft target distribution over next states
+        """
+        self.policy.learn(
+            inputs={
+                self.policy_source_input: [source_encoding],
+                self.policy_target_input: [target_encoding],
+                self.target_node: [policy_target]
+            }
+        )
+
     def _mse(self, predicted, actual):
         # Calculate the squared differences
         squared_errors = np.square(actual - predicted)
