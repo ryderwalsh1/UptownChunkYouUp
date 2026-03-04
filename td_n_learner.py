@@ -252,7 +252,7 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
     correct_predictions = 0
 
     # Sample and evaluate
-    for _ in range(num_samples):
+    for sample in range(num_samples):
         source_literal, target_literal = random.choice(valid_pairs)
 
         # Generate optimal trajectory
@@ -288,6 +288,13 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
             # Get argmax action
             predicted_idx = np.argmax(masked_dist)
             predicted_literal = token_idx_to_literal(predicted_idx, num_vars)
+
+            # Print predictions and targets
+            if sample == 0:  # Only print for the first sample to avoid clutter
+                print(f"  Step {t}: current={current_literal}, optimal_next={optimal_next_literal}")
+                print(f"    Network prediction (masked): {masked_dist}")
+                print(f"    Predicted literal: {predicted_literal}")
+                print(f"    Match: {predicted_literal == optimal_next_literal}")
 
             # Check if prediction matches optimal action
             total_steps += 1
@@ -503,10 +510,10 @@ def train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps
         if t < episode_end:
             next_literal = trajectory[t + 1]
             next_idx = literal_to_token_idx(next_literal, num_vars)
-            policy_target[next_idx] = n_step_return
+            policy_target[next_idx] = 1.0
         else:
             # At goal, target is goal itself
-            policy_target[target_idx] = n_step_return
+            policy_target[target_idx] = 1.0
 
         # Current state encoding
         current_literal = trajectory[t]
@@ -840,7 +847,7 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.2
+    policy_learning_rate = 0.5
     value_learning_rate = 0.5
 
 
