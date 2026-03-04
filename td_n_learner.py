@@ -221,6 +221,165 @@ def generate_trajectory_from_graph(source_literal, target_literal, graph):
 
 
 # ============================================================================
+# Evaluation Functions
+# ============================================================================
+
+def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
+    """
+    Evaluate policy network accuracy on optimal trajectories.
+
+    Samples random (source, target) pairs, generates optimal trajectories,
+    and checks if policy's argmax action matches the optimal next literal
+    at each step (after action masking).
+
+    Args:
+        policy_net: PolicyNetwork - trained policy network
+        graph: nx.DiGraph - implication graph
+        num_vars: int - number of variables
+        num_samples: int - number of (source, target) pairs to sample
+
+    Returns:
+        float - accuracy (correct predictions / total steps), higher is better
+    """
+    # Get all valid (source, target) pairs
+    next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
+    valid_pairs = list(next_steps.keys())
+
+    if len(valid_pairs) == 0:
+        return 0.0
+
+    total_steps = 0
+    correct_predictions = 0
+
+    # Sample and evaluate
+    for _ in range(num_samples):
+        source_literal, target_literal = random.choice(valid_pairs)
+
+        # Generate optimal trajectory
+        trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
+        if trajectory is None or len(trajectory) <= 1:
+            continue
+
+        target_idx = literal_to_token_idx(target_literal, num_vars)
+        target_encoding = np.zeros(2 * num_vars)
+        target_encoding[target_idx] = 1.0
+
+        # Evaluate policy at each step in the trajectory
+        for t in range(len(trajectory) - 1):
+            current_literal = trajectory[t]
+            optimal_next_literal = trajectory[t + 1]
+
+            # Get adjacent nodes for action masking
+            adjacent_literals = get_adjacent_nodes(current_literal, graph)
+            if len(adjacent_literals) == 0:
+                continue
+
+            # Create source encoding
+            current_idx = literal_to_token_idx(current_literal, num_vars)
+            source_encoding = np.zeros(2 * num_vars)
+            source_encoding[current_idx] = 1.0
+
+            # Get policy prediction
+            action_dist = policy_net.predict(source_encoding, target_encoding).flatten()
+
+            # Apply action masking
+            masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
+
+            # Get argmax action
+            predicted_idx = np.argmax(masked_dist)
+            predicted_literal = token_idx_to_literal(predicted_idx, num_vars)
+
+            # Check if prediction matches optimal action
+            total_steps += 1
+            if predicted_literal == optimal_next_literal:
+                correct_predictions += 1
+
+    if total_steps == 0:
+        return 0.0
+
+    return correct_predictions / total_steps
+
+
+def test_loss_value(value_net, graph, num_vars, num_samples=50):
+    """
+    Evaluate value network using Bellman error on optimal trajectories.
+
+    Samples random (source, target) pairs, generates optimal trajectories,
+    and computes mean squared Bellman error: (V(s) - (r + V(s')))^2
+    where r = 1.0 if s' is goal (and V(s') = 0), else r = 0.0.
+
+    Args:
+        value_net: ValueNetwork - trained value network
+        graph: nx.DiGraph - implication graph
+        num_vars: int - number of variables
+        num_samples: int - number of (source, target) pairs to sample
+
+    Returns:
+        float - mean Bellman error (lower is better)
+    """
+    # Get all valid (source, target) pairs
+    next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
+    valid_pairs = list(next_steps.keys())
+
+    if len(valid_pairs) == 0:
+        return 0.0
+
+    bellman_errors = []
+
+    # Sample and evaluate
+    for _ in range(num_samples):
+        source_literal, target_literal = random.choice(valid_pairs)
+
+        # Generate optimal trajectory
+        trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
+        if trajectory is None or len(trajectory) <= 1:
+            continue
+
+        target_idx = literal_to_token_idx(target_literal, num_vars)
+        target_encoding = np.zeros(2 * num_vars)
+        target_encoding[target_idx] = 1.0
+
+        # Evaluate value at each step in the trajectory
+        for t in range(len(trajectory)):
+            current_literal = trajectory[t]
+
+            # Create source encoding
+            current_idx = literal_to_token_idx(current_literal, num_vars)
+            source_encoding = np.zeros(2 * num_vars)
+            source_encoding[current_idx] = 1.0
+
+            # Get value prediction for current state
+            v_current = value_net.predict(source_encoding, target_encoding)
+
+            # Compute Bellman target
+            if current_literal == target_literal:
+                # At goal: reward = 1.0, V(s') = 0 (episode ends)
+                bellman_target = 1.0
+            else:
+                # Not at goal: reward = 0.0, bootstrap with V(s')
+                next_literal = trajectory[t + 1] if t + 1 < len(trajectory) else current_literal
+                next_idx = literal_to_token_idx(next_literal, num_vars)
+                next_encoding = np.zeros(2 * num_vars)
+                next_encoding[next_idx] = 1.0
+
+                # If next state is goal, V(s') = 0
+                if next_literal == target_literal:
+                    bellman_target = 1.0  # reward for reaching goal
+                else:
+                    v_next = value_net.predict(next_encoding, target_encoding)
+                    bellman_target = 0.0 + v_next
+
+            # Compute Bellman error
+            bellman_error = (v_current - bellman_target) ** 2
+            bellman_errors.append(bellman_error)
+
+    if len(bellman_errors) == 0:
+        return 0.0
+
+    return np.mean(bellman_errors)
+
+
+# ============================================================================
 # Policy Evaluation
 # ============================================================================
 
@@ -494,10 +653,10 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             policy_avg_lengths.append(policy_avg_length)
 
             # Capture network losses
-            policy_loss = policy_net.test_loss()
+            policy_loss = test_loss_policy(policy_net, graph, num_vars)
             policy_losses.append(policy_loss)
 
-            value_loss = value_net.test_loss()
+            value_loss = test_loss_value(value_net, graph, num_vars)
             value_losses.append(value_loss)
 
             # Log progress
@@ -505,7 +664,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
-                      f"Policy Loss: {policy_loss:.4f} | "
+                      f"Policy Acc: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
     # Capture final weight matrices
@@ -628,11 +787,11 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     axes[0, 1].set_title('Policy Average Episode Length over Training')
     axes[0, 1].grid(True, alpha=0.3)
 
-    # Policy loss
+    # Policy accuracy
     axes[1, 0].plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
     axes[1, 0].set_xlabel('Training Episode')
-    axes[1, 0].set_ylabel('Policy Loss (MSE)')
-    axes[1, 0].set_title('Policy Network Loss over Training')
+    axes[1, 0].set_ylabel('Policy Accuracy')
+    axes[1, 0].set_title('Policy Network Accuracy over Training')
     axes[1, 0].grid(True, alpha=0.3)
 
     # Value loss
@@ -708,7 +867,7 @@ if __name__ == "__main__":
         graph=graph,
         policy_name='TDN_Policy',
         hidden_size=hidden_size,
-        learning_rate=learning_rate
+        learning_rate=policy_learning_rate
     )
 
     value_net = ValueNetwork(
@@ -716,7 +875,7 @@ if __name__ == "__main__":
         graph=graph,
         value_name='TDN_Value',
         hidden_size=hidden_size,
-        learning_rate=learning_rate
+        learning_rate=value_learning_rate
     )
 
     # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
