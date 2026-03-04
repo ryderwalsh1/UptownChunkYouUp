@@ -336,6 +336,8 @@ def train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps
             # Get value prediction for bootstrapping
             bootstrap_value = value_net.predict(state_encoding, target_encoding)
             n_step_return += bootstrap_value    
+        
+        # print(f"Step {t} | n-step return: {n_step_return:.4f} | Next literal: {trajectory[t+1] if t < episode_end else 'N/A'}")
 
         # Create target distribution: put all mass at next literal in trajectory
         policy_target = np.zeros(vocab_size)
@@ -664,8 +666,8 @@ if __name__ == "__main__":
     # ========================================================================
 
     # Implication graph parameters
-    num_vars = 10
-    num_clauses = 20
+    num_vars = 8
+    num_clauses = 16
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
@@ -679,13 +681,15 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    learning_rate = 0.2
+    policy_learning_rate = 0.2
+    value_learning_rate = 0.5
+
 
     # TD(n) hyperparameters
     n_steps = 1  # Number of steps for TD(n): 1=TD(0), higher=more Monte Carlo
 
     # Number of training episodes
-    num_episodes = 100
+    num_episodes = 500
 
     # Create experiment name
     experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_n{n_steps}'

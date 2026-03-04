@@ -50,11 +50,11 @@ class ValueNetwork():
             function=pnl.Logistic()
         )
 
-        # Output layer produces scalar value estimate (linear activation)
+        # Output layer produces scalar value estimate (logistic activation)
         self.value_output = pnl.ProcessingMechanism(
             name=f'{value_name}_Output',
             input_shapes=1,
-            function=pnl.Linear()
+            function=pnl.Logistic()
         )
 
         # source input to hidden
@@ -82,7 +82,7 @@ class ValueNetwork():
             )
         else:
             self.hidden_to_output = pnl.MappingProjection(
-                matrix=(0.2*np.random.rand(hidden_size, 1) - 0.1)
+                matrix=(0.02*np.random.rand(hidden_size, 1) - 0.01)
             )
 
         # Create the value network composition with symmetric learning pathways
