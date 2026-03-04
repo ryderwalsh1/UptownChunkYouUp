@@ -3,7 +3,7 @@ import random
 import warnings
 import pickle
 import gen_impgraph
-from lambda_labels import lambda_labels
+import networkx as nx
 from policy_network import PolicyNetwork
 from value_network import ValueNetwork
 import matplotlib.pyplot as plt
@@ -195,53 +195,33 @@ def mask_action_distribution(action_dist, valid_literals, num_vars):
 
 
 # ============================================================================
-# Value Target Extraction Functions
+# Trajectory Generation from Graph
 # ============================================================================
 
-def extract_value_target_goal_prob(labels, goal_idx):
+def generate_trajectory_from_graph(source_literal, target_literal, graph):
     """
-    Extract value target as probability mass at goal node.
+    Generate a trajectory from source to target using the implication graph.
+    Uses shortest path if available, otherwise returns None.
 
     Args:
-        labels: np.array - soft label distribution (shape: vocab_size)
-        goal_idx: int - index of goal literal in vocabulary
+        source_literal: int - starting literal
+        target_literal: int - goal literal
+        graph: nx.DiGraph - implication graph
 
     Returns:
-        float - probability at goal index
+        list[int] or None - trajectory from source to target (inclusive), or None if no path exists
     """
-    return labels[goal_idx]
-
-
-def extract_value_target_entropy(labels):
-    """
-    Extract value target based on entropy of the distribution.
-    Lower entropy = more certain = higher value (closer to goal).
-
-    Args:
-        labels: np.array - soft label distribution
-
-    Returns:
-        float - normalized inverse entropy (high when certain, low when uncertain)
-    """
-    # Avoid log(0) by filtering out zeros
-    non_zero_mask = labels > 1e-10
-    if not np.any(non_zero_mask):
-        return 0.0
-
-    # Calculate entropy
-    entropy = -np.sum(labels[non_zero_mask] * np.log2(labels[non_zero_mask]))
-
-    # Max entropy for a distribution over vocab_size elements is log2(vocab_size)
-    max_entropy = np.log2(len(labels))
-
-    # Normalize and invert: high certainty (low entropy) = high value
-    normalized_inverse_entropy = 1.0 - (entropy / max_entropy)
-
-    return normalized_inverse_entropy
+    try:
+        # Find shortest path from source to target
+        path = nx.shortest_path(graph, source=source_literal, target=target_literal)
+        return path
+    except nx.NetworkXNoPath:
+        # No path exists
+        return None
 
 
 # ============================================================================
-# Episode Execution
+# Policy Evaluation
 # ============================================================================
 
 def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100):
@@ -305,98 +285,145 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 
 
 # ============================================================================
-# Training Functions
+# TD(n) Training Functions
 # ============================================================================
 
-def train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_decay, num_vars):
+def train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps, num_vars):
     """
-    Train policy network on a completed trajectory using lambda-weighted soft labels.
+    Train policy network on a trajectory using online TD(n) updates.
+    Updates are applied at every step during the episode.
 
     Args:
         policy_net: PolicyNetwork - policy network to train
-        trajectory: list[int] - sequence of literals visited
+        trajectory: list[int] - sequence of literals from source to target
         target_literal: int - goal literal
-        lambda_decay: float - lambda parameter for TD(lambda)
+        n_steps: int - number of steps for TD(n)
         num_vars: int - number of variables
     """
-    # Convert trajectory to token indices
-    token_trajectory = [literal_to_token_idx(lit, num_vars) for lit in trajectory]
-
-    # Compute lambda labels
     vocab_size = 2 * num_vars
-    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay)
-
-    # Target encoding (constant throughout trajectory)
     target_idx = literal_to_token_idx(target_literal, num_vars)
     target_encoding = np.zeros(vocab_size)
     target_encoding[target_idx] = 1.0
 
-    # Apply updates for each timestep
-    for t, literal in enumerate(trajectory):
-        # Source encoding (current state)
-        source_idx = literal_to_token_idx(literal, num_vars)
+    # Apply online updates at every step
+    for t in range(len(trajectory)):
+        # Compute n-step return
+        # G_t = r_t + r_{t+1} + ... + r_{t+n-1} + V(s_{t+n})
+
+        n_step_return = 0.0
+        episode_end = len(trajectory) - 1
+
+        # Sum rewards for next n steps (or until episode ends)
+        for i in range(n_steps):
+            step_idx = t + i
+            if step_idx > episode_end:
+                break
+
+            # Reward: 1.0 if this step reaches the goal, 0.0 otherwise
+            if trajectory[step_idx] == target_literal:
+                n_step_return += 1.0
+                break  # Episode ends at goal
+
+        # Bootstrap with policy network if episode continues beyond t+n
+        bootstrap_idx = t + n_steps
+        if bootstrap_idx <= episode_end and trajectory[bootstrap_idx - 1] != target_literal:
+            # Get state at t+n
+            state_literal = trajectory[bootstrap_idx]
+            state_idx = literal_to_token_idx(state_literal, num_vars)
+            state_encoding = np.zeros(vocab_size)
+            state_encoding[state_idx] = 1.0
+
+            # Get value prediction for bootstrapping
+            bootstrap_value = value_net.predict(state_encoding, target_encoding)
+            n_step_return += bootstrap_value    
+
+        # Create target distribution: put all mass at next literal in trajectory
+        policy_target = np.zeros(vocab_size)
+        if t < episode_end:
+            next_literal = trajectory[t + 1]
+            next_idx = literal_to_token_idx(next_literal, num_vars)
+            policy_target[next_idx] = n_step_return
+        else:
+            # At goal, target is goal itself
+            policy_target[target_idx] = n_step_return
+
+        # Current state encoding
+        current_literal = trajectory[t]
+        current_idx = literal_to_token_idx(current_literal, num_vars)
         source_encoding = np.zeros(vocab_size)
-        source_encoding[source_idx] = 1.0
+        source_encoding[current_idx] = 1.0
 
-        # Soft target from lambda labels
-        policy_target = soft_labels[t]
-
-        # Single update
+        # Apply update
         policy_net.update_single(source_encoding, target_encoding, policy_target)
 
 
-def train_value_on_trajectory(value_net, trajectory, target_literal, lambda_decay, num_vars,
-                                value_method='goal_prob'):
+def train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars):
     """
-    Train value network on a completed trajectory using lambda-weighted soft labels.
+    Train value network on a trajectory using online TD(n) updates.
+    Updates are applied at every step during the episode.
 
     Args:
         value_net: ValueNetwork - value network to train
-        trajectory: list[int] - sequence of literals visited
+        trajectory: list[int] - sequence of literals from source to target
         target_literal: int - goal literal
-        lambda_decay: float - lambda parameter for TD(lambda)
+        n_steps: int - number of steps for TD(n)
         num_vars: int - number of variables
-        value_method: str - 'goal_prob' or 'entropy' for extracting scalar value from distribution
     """
-    # Convert trajectory to token indices
-    token_trajectory = [literal_to_token_idx(lit, num_vars) for lit in trajectory]
-
-    # Compute lambda labels
     vocab_size = 2 * num_vars
-    soft_labels = lambda_labels(token_trajectory, vocab_size, lambda_=lambda_decay)
-
-    # Target encoding (constant throughout trajectory)
     target_idx = literal_to_token_idx(target_literal, num_vars)
     target_encoding = np.zeros(vocab_size)
     target_encoding[target_idx] = 1.0
 
-    # Apply updates for each timestep
-    for t, literal in enumerate(trajectory):
-        # Source encoding (current state)
-        source_idx = literal_to_token_idx(literal, num_vars)
+    # Apply online updates at every step
+    for t in range(len(trajectory)):
+        # Compute n-step return
+        # G_t = r_t + r_{t+1} + ... + r_{t+n-1} + V(s_{t+n})
+
+        n_step_return = 0.0
+        episode_end = len(trajectory) - 1
+
+        # Sum rewards for next n steps (or until episode ends)
+        for i in range(n_steps):
+            step_idx = t + i
+            if step_idx > episode_end:
+                break
+
+            # Reward: 1.0 if this step reaches the goal, 0.0 otherwise
+            if trajectory[step_idx] == target_literal:
+                n_step_return += 1.0
+                break  # Episode ends at goal
+
+        # Bootstrap with value network if episode continues beyond t+n
+        bootstrap_idx = t + n_steps
+        if bootstrap_idx <= episode_end and trajectory[bootstrap_idx - 1] != target_literal:
+            # Get state at t+n
+            state_literal = trajectory[bootstrap_idx]
+            state_idx = literal_to_token_idx(state_literal, num_vars)
+            state_encoding = np.zeros(vocab_size)
+            state_encoding[state_idx] = 1.0
+
+            # Get value estimate for bootstrapping
+            bootstrap_value = value_net.predict(state_encoding, target_encoding)
+            n_step_return += bootstrap_value
+
+        # Current state encoding
+        current_literal = trajectory[t]
+        current_idx = literal_to_token_idx(current_literal, num_vars)
         source_encoding = np.zeros(vocab_size)
-        source_encoding[source_idx] = 1.0
+        source_encoding[current_idx] = 1.0
 
-        # Extract scalar value target from soft labels
-        if value_method == 'goal_prob':
-            value_target = extract_value_target_goal_prob(soft_labels[t], target_idx)
-        elif value_method == 'entropy':
-            value_target = extract_value_target_entropy(soft_labels[t])
-        else:
-            raise ValueError(f"Unknown value_method: {value_method}")
-
-        # Single update
-        value_net.update_single(source_encoding, target_encoding, value_target)
+        # Apply update with scalar n-step return
+        value_net.update_single(source_encoding, target_encoding, n_step_return)
 
 
 # ============================================================================
 # Main Training Loop
 # ============================================================================
 
-def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, lambda_decay=0.9,
-                     value_method='goal_prob', max_steps=100, log_interval=10, capture_interval=50, verbose=True):
+def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_steps=3,
+               max_steps=100, capture_interval=50, eval_episodes=10, verbose=True):
     """
-    Train policy and value networks using online TD(lambda) with soft labels.
+    Train policy and value networks using online TD(n).
 
     Args:
         policy_net: PolicyNetwork - policy network to train
@@ -404,19 +431,15 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
         num_episodes: int - number of training episodes
-        lambda_decay: float - lambda parameter for TD(lambda) (0.0 to 1.0)
-        value_method: str - 'goal_prob' or 'entropy'
-        max_steps: int - maximum steps per episode
-        log_interval: int - how often to log statistics
-        capture_interval: int - how often to capture weights and compute test metrics
+        n_steps: int - number of steps for TD(n) (1 = TD(0), higher = more Monte Carlo)
+        max_steps: int - maximum trajectory length to consider (skip if longer)
+        capture_interval: int - how often to capture weights, evaluate policy, and log progress
+        eval_episodes: int - number of episodes to run for policy evaluation
         verbose: bool - whether to print progress
 
     Returns:
-        dict - training statistics (success_rate, avg_episode_length, etc.)
+        dict - training statistics (policy success_rate, avg_episode_length, etc.)
     """
-    # Get all literals
-    literals = [i for i in range(1, num_vars + 1)] + [-i for i in range(1, num_vars + 1)]
-
     # Get all valid (source, target) pairs from next_steps
     next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
     valid_pairs = list(next_steps.keys())
@@ -424,69 +447,64 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
     if len(valid_pairs) == 0:
         raise ValueError("No valid (source, target) pairs found in graph")
 
-    # Tracking metrics
-    episode_lengths = []
-    success_rates = []
-    avg_lengths = []
+    # Tracking metrics for policy evaluation
+    policy_success_rates = []
+    policy_avg_lengths = []
     captured_episodes = []
     policy_losses = []
     value_losses = []
 
-    success_count = 0
-    total_episodes = 0
-
     # Training loop
     for episode in range(num_episodes):
-        # Sample random (source, target) pair
-        source_literal, target_literal = random.choice(valid_pairs)
-
-        # Run episode
-        trajectory, reached_goal = run_episode(
-            policy_net, source_literal, target_literal, graph, num_vars, max_steps
-        )
-
-        # Update metrics
-        episode_lengths.append(len(trajectory))
-        if reached_goal:
-            success_count += 1
-        total_episodes += 1
+        # Sample random (source, target) pair until we get a valid trajectory
+        trajectory = None
+        while trajectory is None or len(trajectory) > max_steps:
+            source_literal, target_literal = random.choice(valid_pairs)
+            trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
 
         # Train both networks on trajectory
-        train_policy_on_trajectory(policy_net, trajectory, target_literal, lambda_decay, num_vars)
-        train_value_on_trajectory(value_net, trajectory, target_literal, lambda_decay, num_vars, value_method)
+        train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps, num_vars)
+        train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars)
 
-        # Capture metrics at intervals
+        # Capture metrics and log at intervals
         if (episode + 1) % capture_interval == 0:
             captured_episodes.append(episode + 1)
 
-            # Compute success rate over all episodes so far
-            current_success_rate = success_count / total_episodes
-            success_rates.append(current_success_rate)
+            # Evaluate policy on random episodes
+            eval_successes = 0
+            eval_lengths = []
 
-            # Compute average length over recent episodes
-            recent_window = min(capture_interval, len(episode_lengths))
-            current_avg_length = np.mean(episode_lengths[-recent_window:])
-            avg_lengths.append(current_avg_length)
+            for _ in range(eval_episodes):
+                eval_source, eval_target = random.choice(valid_pairs)
+                eval_trajectory, eval_reached_goal = run_episode(
+                    policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                )
 
-            # Capture policy network loss
+                if eval_reached_goal:
+                    eval_successes += 1
+                eval_lengths.append(len(eval_trajectory))
+
+            # Record policy evaluation metrics
+            policy_success_rate = eval_successes / eval_episodes
+            policy_success_rates.append(policy_success_rate)
+
+            policy_avg_length = np.mean(eval_lengths)
+            policy_avg_lengths.append(policy_avg_length)
+
+            # Capture network losses
             policy_loss = policy_net.test_loss()
             policy_losses.append(policy_loss)
 
-            # Capture value network loss
             value_loss = value_net.test_loss()
             value_losses.append(value_loss)
 
-        # Log progress
-        if verbose and (episode + 1) % log_interval == 0:
-            recent_successes = success_count
-            recent_episodes = total_episodes
-            success_rate = recent_successes / recent_episodes if recent_episodes > 0 else 0.0
-            avg_length = np.mean(episode_lengths[-log_interval:]) if len(episode_lengths) >= log_interval else np.mean(episode_lengths)
-
-            print(f"Episode {episode + 1}/{num_episodes} | "
-                  f"Success Rate: {success_rate:.2%} | "
-                  f"Avg Length: {avg_length:.1f} | "
-                  f"Last: {len(trajectory)} steps, {'SUCCESS' if reached_goal else 'FAILED'}")
+            # Log progress
+            if verbose:
+                print(f"Episode {episode + 1}/{num_episodes} | "
+                      f"Success: {policy_success_rate:.2%} | "
+                      f"Avg Len: {policy_avg_length:.1f} | "
+                      f"Policy Loss: {policy_loss:.4f} | "
+                      f"Value Loss: {value_loss:.4f}")
 
     # Capture final weight matrices
     final_policy_matrices = {
@@ -502,14 +520,9 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
 
     # Compute final statistics
     stats = {
-        'episode_lengths': episode_lengths,
-        'success_rate': success_count / total_episodes,
-        'avg_episode_length': np.mean(episode_lengths),
-        'total_episodes': total_episodes,
-        'successful_episodes': success_count,
+        'policy_success_rates': policy_success_rates,
+        'policy_avg_lengths': policy_avg_lengths,
         'captured_episodes': captured_episodes,
-        'success_rates': success_rates,
-        'avg_lengths': avg_lengths,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
         'final_policy_matrices': final_policy_matrices,
@@ -523,13 +536,13 @@ def train_td_lambda(policy_net, value_net, graph, num_vars, num_episodes=1000, l
 # Results Saving and Plotting
 # ============================================================================
 
-def save_results(stats, experiment_name, save_dir='results/on_policy'):
+def save_results(stats, experiment_name, save_dir='results/td_n'):
     """
     Save training statistics and final weight matrices to disk.
 
     Args:
-        stats: dict - statistics returned from train_td_lambda
-        experiment_name: str - name for this experiment (e.g., 'impgraph_10v_15c_lambda0.9')
+        stats: dict - statistics returned from train_td_n
+        experiment_name: str - name for this experiment (e.g., 'impgraph_10v_15c_n3')
         save_dir: str - directory to save results
     """
     # Create directories
@@ -537,18 +550,18 @@ def save_results(stats, experiment_name, save_dir='results/on_policy'):
     os.makedirs(f'{save_dir}/final_weights/{experiment_name}', exist_ok=True)
     os.makedirs(f'{save_dir}/plots', exist_ok=True)
 
-    # Save success rates
-    with open(f'{save_dir}/metrics/{experiment_name}_success_rates.csv', 'w', newline='') as f:
+    # Save policy success rates
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_success_rates.csv', 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['episode', 'success_rate'])
-        for episode, rate in zip(stats['captured_episodes'], stats['success_rates']):
+        writer.writerow(['episode', 'policy_success_rate'])
+        for episode, rate in zip(stats['captured_episodes'], stats['policy_success_rates']):
             writer.writerow([episode, rate])
 
-    # Save average episode lengths
-    with open(f'{save_dir}/metrics/{experiment_name}_avg_lengths.csv', 'w', newline='') as f:
+    # Save policy average episode lengths
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_avg_lengths.csv', 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['episode', 'avg_length'])
-        for episode, length in zip(stats['captured_episodes'], stats['avg_lengths']):
+        writer.writerow(['episode', 'policy_avg_length'])
+        for episode, length in zip(stats['captured_episodes'], stats['policy_avg_lengths']):
             writer.writerow([episode, length])
 
     # Save policy losses
@@ -564,13 +577,6 @@ def save_results(stats, experiment_name, save_dir='results/on_policy'):
         writer.writerow(['episode', 'loss'])
         for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
             writer.writerow([episode, loss])
-
-    # Save all episode lengths
-    with open(f'{save_dir}/metrics/{experiment_name}_all_episode_lengths.csv', 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['episode', 'length'])
-        for episode, length in enumerate(stats['episode_lengths'], 1):
-            writer.writerow([episode, length])
 
     # Save final policy weight matrices
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_source_to_hidden.npy',
@@ -593,43 +599,43 @@ def save_results(stats, experiment_name, save_dir='results/on_policy'):
     print(f"  - Final weights: {save_dir}/final_weights/{experiment_name}/")
 
 
-def plot_training_curves(stats, experiment_name, save_dir='results/on_policy', show=False):
+def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=False):
     """
-    Plot and save training curves (success rate, episode length, losses).
+    Plot and save training curves (policy success rate, policy episode length, losses).
 
     Args:
-        stats: dict - statistics returned from train_td_lambda
+        stats: dict - statistics returned from train_td_n
         experiment_name: str - name for this experiment
         save_dir: str - directory to save plots
         show: bool - whether to display plots (default False, just save)
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Success rate
-    axes[0, 0].plot(stats['captured_episodes'], stats['success_rates'], 'b-', linewidth=2)
-    axes[0, 0].set_xlabel('Episode')
-    axes[0, 0].set_ylabel('Success Rate')
-    axes[0, 0].set_title('Success Rate over Training')
+    # Policy success rate
+    axes[0, 0].plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
+    axes[0, 0].set_xlabel('Training Episode')
+    axes[0, 0].set_ylabel('Policy Success Rate')
+    axes[0, 0].set_title('Policy Success Rate over Training')
     axes[0, 0].grid(True, alpha=0.3)
     axes[0, 0].set_ylim([0, 1.05])
 
-    # Average episode length
-    axes[0, 1].plot(stats['captured_episodes'], stats['avg_lengths'], 'g-', linewidth=2)
-    axes[0, 1].set_xlabel('Episode')
-    axes[0, 1].set_ylabel('Average Episode Length')
-    axes[0, 1].set_title('Average Episode Length over Training')
+    # Policy average episode length
+    axes[0, 1].plot(stats['captured_episodes'], stats['policy_avg_lengths'], 'g-', linewidth=2)
+    axes[0, 1].set_xlabel('Training Episode')
+    axes[0, 1].set_ylabel('Policy Average Episode Length')
+    axes[0, 1].set_title('Policy Average Episode Length over Training')
     axes[0, 1].grid(True, alpha=0.3)
 
     # Policy loss
     axes[1, 0].plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
-    axes[1, 0].set_xlabel('Episode')
+    axes[1, 0].set_xlabel('Training Episode')
     axes[1, 0].set_ylabel('Policy Loss (MSE)')
     axes[1, 0].set_title('Policy Network Loss over Training')
     axes[1, 0].grid(True, alpha=0.3)
 
     # Value loss
     axes[1, 1].plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
-    axes[1, 1].set_xlabel('Episode')
+    axes[1, 1].set_xlabel('Training Episode')
     axes[1, 1].set_ylabel('Value Loss (MSE)')
     axes[1, 1].set_title('Value Network Loss over Training')
     axes[1, 1].grid(True, alpha=0.3)
@@ -658,35 +664,45 @@ if __name__ == "__main__":
     # ========================================================================
 
     # Implication graph parameters
-    num_vars = 8
-    num_clauses = 10
+    num_vars = 10
+    num_clauses = 20
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
-    graph_path = 'results/graphs/impgraph_8v_10c/graph.pkl'
-    graph = load_graph(graph_path)
-    print(f"Loaded graph from {graph_path}")
+    # graph_path = 'results/graphs/impgraph_8v_10c/graph.pkl'
+    # graph = load_graph(graph_path)
+    # print(f"Loaded graph from {graph_path}")
 
     # Option 2: Generate a new graph
-    # graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
-    # print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+    graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
+    print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # Network hyperparameters
     hidden_size = 25
-    learning_rate = 0.5
+    learning_rate = 0.2
 
-    # TD(lambda) hyperparameters
-    lambda_decay = 0.9
-    value_method = 'goal_prob'  # or 'entropy'
+    # TD(n) hyperparameters
+    n_steps = 1  # Number of steps for TD(n): 1=TD(0), higher=more Monte Carlo
+
+    # Number of training episodes
+    num_episodes = 100
 
     # Create experiment name
-    experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_lambda{lambda_decay}'
+    experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_n{n_steps}'
+
+    # Save graph for reference
+    os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+    with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+        pickle.dump(graph, f)
+    print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+    gen_impgraph.visualize_graph(graph)
+    plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
     # Create networks
     policy_net = PolicyNetwork(
         num_vars=num_vars,
         graph=graph,
-        policy_name='TDLambda_Policy',
+        policy_name='TDN_Policy',
         hidden_size=hidden_size,
         learning_rate=learning_rate
     )
@@ -694,44 +710,42 @@ if __name__ == "__main__":
     value_net = ValueNetwork(
         num_vars=num_vars,
         graph=graph,
-        value_name='TDLambda_Value',
+        value_name='TDN_Value',
         hidden_size=hidden_size,
         learning_rate=learning_rate
     )
 
     # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
     # Uncomment to load weights:
-    policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-    load_weights_into_network(policy_net, policy_weights_dir, network_type='policy', epoch=495)
+    # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
+    # load_weights_into_network(policy_net, policy_weights_dir, network_type='policy', epoch=495)
     # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
     # load_weights_into_network(value_net, value_weights_dir, network_type='value')
 
-    print(f"Training TD(λ) with λ={lambda_decay}, value_method={value_method}")
+    print(f"Training TD(n) with n={n_steps}")
     print(f"Graph: {num_vars} vars, {num_clauses} clauses")
     print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
     print()
 
     # Train
-    stats = train_td_lambda(
+    stats = train_td_n(
         policy_net=policy_net,
         value_net=value_net,
         graph=graph,
         num_vars=num_vars,
-        num_episodes=500,
-        lambda_decay=lambda_decay,
-        value_method=value_method,
+        num_episodes=num_episodes,
+        n_steps=n_steps,
         max_steps=50,
-        log_interval=10,
         capture_interval=10,
         verbose=True
     )
 
     print("\n" + "="*60)
     print("Training Complete!")
-    print(f"Final Success Rate: {stats['success_rate']:.2%}")
-    print(f"Average Episode Length: {stats['avg_episode_length']:.2f}")
-    print(f"Total Episodes: {stats['total_episodes']}")
-    print(f"Successful Episodes: {stats['successful_episodes']}")
+    if len(stats['policy_success_rates']) > 0:
+        print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
+        print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
+    print(f"Training Episodes: {num_episodes}")
     print("="*60)
 
     # Save results
