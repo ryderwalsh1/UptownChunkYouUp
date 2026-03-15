@@ -399,7 +399,7 @@ def test_loss_value(value_net, graph, num_vars, num_samples=50):
 # Policy Evaluation
 # ============================================================================
 
-def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100):
+def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5):
     """
     Execute one episode from source to target using the policy network with action masking.
 
@@ -410,6 +410,8 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
         max_steps: int - maximum steps before termination
+        entropy_threshold: float or None - if set, policy takes optimal action (argmax) when entropy
+                                           is above this threshold; if None, always samples from distribution
 
     Returns:
         tuple: (trajectory, reached_goal, avg_entropy)
@@ -456,9 +458,21 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         entropy = policy_net._decision_entropy(action_dist)
         entropies.append(entropy)
 
+        # Choose action: apply entropy-gating if threshold is set
+        if entropy_threshold is not None and entropy > entropy_threshold:
+            # Entropy is high (uncertain), take optimal action from graph
+            optimal_trajectory = generate_trajectory_from_graph(current_literal, target_literal, graph)
+            if optimal_trajectory is not None and len(optimal_trajectory) > 1:
+                # Take the next step from optimal trajectory
+                optimal_next_literal = optimal_trajectory[1]
+                next_idx = literal_to_token_idx(optimal_next_literal, num_vars)
+            else:
+                # No optimal path found, fallback to sampling
+                next_idx = np.random.choice(len(action_dist), p=action_dist)
+        else:
+            # Entropy is low or no threshold set, sample from distribution
+            next_idx = np.random.choice(len(action_dist), p=action_dist)
 
-        # Sample action from distribution
-        next_idx = np.random.choice(len(action_dist), p=action_dist)
         next_literal = token_idx_to_literal(next_idx, num_vars)
 
         # Update state
@@ -756,7 +770,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
                     )
 
-                    print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
+                    # print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
 
                     if eval_reached_goal:
                         eval_successes += 1
@@ -1181,11 +1195,11 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.1
+    policy_learning_rate = 0.32
     value_learning_rate = 0.5
 
     # Number of training episodes
-    num_episodes = 1000
+    num_episodes = 1200
 
     # ========================================================================
     # Teacher Forcing Mode
