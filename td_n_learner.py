@@ -731,19 +731,31 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         if (episode + 1) % capture_interval == 0:
             captured_episodes.append(episode + 1)
 
-            # Evaluate policy on random episodes
+            # Evaluate policy (use fixed pair if specified)
             eval_successes = 0
             eval_lengths = []
 
-            for _ in range(eval_episodes):
-                eval_source, eval_target = random.choice(valid_pairs)
-                eval_trajectory, eval_reached_goal = run_episode(
-                    policy_net, eval_source, eval_target, graph, num_vars, max_steps
-                )
+            if training_mode == 'fixed_pair':
+                # Evaluate only on the fixed pair
+                for _ in range(eval_episodes):
+                    eval_trajectory, eval_reached_goal = run_episode(
+                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
+                    )
 
-                if eval_reached_goal:
-                    eval_successes += 1
-                eval_lengths.append(len(eval_trajectory))
+                    if eval_reached_goal:
+                        eval_successes += 1
+                    eval_lengths.append(len(eval_trajectory))
+            else:
+                # Evaluate on random episodes
+                for _ in range(eval_episodes):
+                    eval_source, eval_target = random.choice(valid_pairs)
+                    eval_trajectory, eval_reached_goal = run_episode(
+                        policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                    )
+
+                    if eval_reached_goal:
+                        eval_successes += 1
+                    eval_lengths.append(len(eval_trajectory))
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -873,19 +885,31 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         if (episode + 1) % capture_interval == 0:
             captured_episodes.append(episode + 1)
 
-            # Evaluate policy on random episodes
+            # Evaluate policy (use fixed pair if specified)
             eval_successes = 0
             eval_lengths = []
 
-            for _ in range(eval_episodes):
-                eval_source, eval_target = random.choice(valid_pairs)
-                eval_trajectory, eval_reached_goal = run_episode(
-                    policy_net, eval_source, eval_target, graph, num_vars, max_steps
-                )
+            if training_mode == 'fixed_pair':
+                # Evaluate only on the fixed pair
+                for _ in range(eval_episodes):
+                    eval_trajectory, eval_reached_goal = run_episode(
+                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
+                    )
 
-                if eval_reached_goal:
-                    eval_successes += 1
-                eval_lengths.append(len(eval_trajectory))
+                    if eval_reached_goal:
+                        eval_successes += 1
+                    eval_lengths.append(len(eval_trajectory))
+            else:
+                # Evaluate on random episodes
+                for _ in range(eval_episodes):
+                    eval_source, eval_target = random.choice(valid_pairs)
+                    eval_trajectory, eval_reached_goal = run_episode(
+                        policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                    )
+
+                    if eval_reached_goal:
+                        eval_successes += 1
+                    eval_lengths.append(len(eval_trajectory))
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -1091,7 +1115,7 @@ if __name__ == "__main__":
     # ========================================================================
 
     # Choose training mode: 'teacher_forcing' or 'td_n'
-    training_mode = 'td_n'
+    training_mode = 'teacher_forcing'
 
     # Implication graph parameters
     num_vars = 6
@@ -1123,12 +1147,12 @@ if __name__ == "__main__":
         experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_teacher_forcing'
 
         # Save graph for reference
-        os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
-        with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
-            pickle.dump(graph, f)
-        print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
-        gen_impgraph.visualize_graph(graph)
-        plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
+        # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+        # with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+        #     pickle.dump(graph, f)
+        # print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+        # gen_impgraph.visualize_graph(graph)
+        # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
         # Option: Load pre-trained weights
         # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
