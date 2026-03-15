@@ -4,8 +4,8 @@ import gen_impgraph
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='psyneulink')
 
-class PolicyNetwork():
-    def __init__(self, num_vars, num_clauses=None, graph=None, policy_name='Policy', hidden_size=20, learning_rate=0.5, **kwargs):
+class MLPComposition():
+    def __init__(self, num_vars, num_clauses=None, graph=None, mlp_name='MLP', hidden_size=20, learning_rate=0.5, **kwargs):
         # generate structure from implication graph
         # Can either pass in a graph or generate a new one
         if graph is None:
@@ -32,27 +32,27 @@ class PolicyNetwork():
         self.hidden_size = hidden_size
         self.learning_rate = learning_rate
 
-        # Create policy network input nodes
-        self.policy_source_input = pnl.ProcessingMechanism(
-            name=f'{policy_name}_Source_Input',
+        # Create MLP input nodes
+        self.mlp_source_input = pnl.ProcessingMechanism(
+            name=f'{mlp_name}_Source_Input',
             input_shapes=self.num_literals
         )
 
-        self.policy_target_input = pnl.ProcessingMechanism(
-            name=f'{policy_name}_Target_Input',
+        self.mlp_target_input = pnl.ProcessingMechanism(
+            name=f'{mlp_name}_Target_Input',
             input_shapes=self.num_literals
         )
 
         # Hidden layer receives projections from both source and target inputs
-        self.policy_hidden = pnl.ProcessingMechanism(
-            name=f'{policy_name}_Hidden',
+        self.mlp_hidden = pnl.ProcessingMechanism(
+            name=f'{mlp_name}_Hidden',
             input_shapes=hidden_size,
             function=pnl.Logistic()
         )
 
-        # Output layer produces action logits/probabilities
-        self.policy_output = pnl.ProcessingMechanism(
-            name=f'{policy_name}_Output',
+        # Output layer produces next literal predictions
+        self.mlp_output = pnl.ProcessingMechanism(
+            name=f'{mlp_name}_Output',
             input_shapes=self.num_literals,
             function=pnl.SoftMax(gain=10.0)
         )
@@ -85,28 +85,28 @@ class PolicyNetwork():
                 matrix=(0.2*np.random.rand(hidden_size, self.num_literals) - 0.1)
             )
 
-        # Create the policy network composition with symmetric learning pathways
-        policy_comp = pnl.Composition(name=policy_name)
+        # Create the MLP composition with symmetric learning pathways
+        mlp_comp = pnl.Composition(name=mlp_name)
 
-        policy_comp.add_linear_processing_pathway(
-            [self.policy_source_input, self.source_to_hidden, self.policy_hidden, self.hidden_to_output, self.policy_output]
+        mlp_comp.add_linear_processing_pathway(
+            [self.mlp_source_input, self.source_to_hidden, self.mlp_hidden, self.hidden_to_output, self.mlp_output]
         )
-        policy_comp.add_linear_processing_pathway(
-            [self.policy_target_input, self.target_to_hidden, self.policy_hidden, self.hidden_to_output, self.policy_output]
+        mlp_comp.add_linear_processing_pathway(
+            [self.mlp_target_input, self.target_to_hidden, self.mlp_hidden, self.hidden_to_output, self.mlp_output]
         )
 
-        policy_comp.add_backpropagation_learning_pathway(
-            pathway=[self.policy_source_input, self.policy_hidden, self.policy_output],
+        mlp_comp.add_backpropagation_learning_pathway(
+            pathway=[self.mlp_source_input, self.mlp_hidden, self.mlp_output],
             learning_rate=learning_rate
         )
-        policy_comp.add_backpropagation_learning_pathway(
-            pathway=[self.policy_target_input, self.policy_hidden, self.policy_output],
+        mlp_comp.add_backpropagation_learning_pathway(
+            pathway=[self.mlp_target_input, self.mlp_hidden, self.mlp_output],
             learning_rate=learning_rate
         )
 
-        self.target_node = policy_comp.nodes[f'TARGET for {policy_name}_Output']
+        self.target_node = mlp_comp.nodes[f'TARGET for {mlp_name}_Output']
 
-        self.policy = policy_comp
+        self.mlp = mlp_comp
 
         training_sources = []
         training_targets = []
@@ -122,7 +122,7 @@ class PolicyNetwork():
         self.expected_answers = np.array(expected_answers)
 
     def show_graph(self, show_learning=False, show_nested=pnl.INSET):
-        self.policy.show_graph(
+        self.mlp.show_graph(
             show_learning= show_learning,
             show_nested= show_nested
         )
@@ -130,10 +130,10 @@ class PolicyNetwork():
     def test_accuracy(self):
         correct = 0
         for i in range(len(self.memories)):
-            retrieved = self.policy.run(
+            retrieved = self.mlp.run(
                 inputs={
-                    self.policy_source_input: self.training_sources[i],
-                    self.policy_target_input: self.training_targets[i]
+                    self.mlp_source_input: self.training_sources[i],
+                    self.mlp_target_input: self.training_targets[i]
                 }
             )
             index = np.argmax(retrieved)
@@ -142,14 +142,14 @@ class PolicyNetwork():
                 correct += 1
         accuracy = correct / len(self.memories)
         return accuracy
-
+    
     def test_loss(self):
         total_loss = 0.0
         for i in range(len(self.memories)):
-            retrieved = self.policy.run(
+            retrieved = self.mlp.run(
                 inputs={
-                    self.policy_source_input: self.training_sources[i],
-                    self.policy_target_input: self.training_targets[i]
+                    self.mlp_source_input: self.training_sources[i],
+                    self.mlp_target_input: self.training_targets[i]
                 }
             )
             loss = self._mse(retrieved.flatten(), self.expected_answers[i])
@@ -262,10 +262,10 @@ class PolicyNetwork():
         num_samples = len(trajectory_sources)
 
         for i in range(num_samples):
-            retrieved = self.policy.run(
+            retrieved = self.mlp.run(
                 inputs={
-                    self.policy_source_input: trajectory_sources[i],
-                    self.policy_target_input: trajectory_targets[i]
+                    self.mlp_source_input: trajectory_sources[i],
+                    self.mlp_target_input: trajectory_targets[i]
                 }
             )
             predicted_index = np.argmax(retrieved)
@@ -304,10 +304,10 @@ class PolicyNetwork():
                 print(f"Epoch {epoch}: Loss = {loss:.6f}, Accuracy = {accuracy*100:.2f}%")
                 losses.append(loss)
                 learning_matrices = self._capture_learning_matrices(learning_matrices)
-            self.policy.learn(
+            self.mlp.learn(
                 inputs={
-                    self.policy_source_input: self.training_sources,
-                    self.policy_target_input: self.training_targets,
+                    self.mlp_source_input: self.training_sources,
+                    self.mlp_target_input: self.training_targets,
                     self.target_node: self.expected_answers
                 }
             )
@@ -318,8 +318,8 @@ class PolicyNetwork():
         """
         Simulate implication chain learning from source to target with sequential learning.
 
-        The policy network learns by traversing from source_literal to target_literal repeatedly.
-        Each epoch is one complete trajectory. The policy network only learns from the
+        The MLP learns by traversing from source_literal to target_literal repeatedly.
+        Each epoch is one complete trajectory. The MLP only learns from the
         current source-target pair at each step, not all possible pairs.
 
         Args:
@@ -329,7 +329,7 @@ class PolicyNetwork():
             capture_interval: int - how often to capture accuracy/weights (in epochs)
             position_update: str - 'predicted' or 'actual'
                 - 'actual': update literal based on correct next step, epoch ends when reaching target
-                - 'predicted': update literal based on policy network's predicted next step
+                - 'predicted': update literal based on MLP's predicted next step
             max_steps: int - maximum steps per epoch to prevent infinite loops
 
         Returns:
@@ -375,11 +375,11 @@ class PolicyNetwork():
                 target_encoding = np.zeros(self.num_literals)
                 target_encoding[target_idx] = 1
 
-                # Get policy network prediction
-                prediction = self.policy.run(
+                # Get MLP prediction
+                prediction = self.mlp.run(
                     inputs={
-                        self.policy_source_input: source_encoding,
-                        self.policy_target_input: target_encoding
+                        self.mlp_source_input: source_encoding,
+                        self.mlp_target_input: target_encoding
                     }
                 )
                 predicted_literal_idx = np.argmax(prediction)
@@ -399,10 +399,10 @@ class PolicyNetwork():
                 answer_encoding[correct_next_idx] = 1
 
                 # Learn from this single instance
-                self.policy.learn(
+                self.mlp.learn(
                     inputs={
-                        self.policy_source_input: [source_encoding],
-                        self.policy_target_input: [target_encoding],
+                        self.mlp_source_input: [source_encoding],
+                        self.mlp_target_input: [target_encoding],
                         self.target_node: [answer_encoding]
                     }
                 )
@@ -468,7 +468,7 @@ class PolicyNetwork():
                       max_steps=100):
         '''
         traverses an implication chain from source to target literal. Consults the oracle
-        (self.next_steps) for the correct next literal should the entropy of the policy output
+        (self.next_steps) for the correct next literal should the entropy of the MLP output
         exceed a threshold tau.
         Args:
             source: int - starting literal
@@ -476,15 +476,15 @@ class PolicyNetwork():
             tau: float - entropy threshold for consulting the oracle
             force_action: boolean - determines whether the agent's next literal is dictated by
                 the oracle (True) or its own prediction (False) in the event of confident but
-                wrong decisions made by the policy network.
-            max_steps: integer - maximum number of steps the policy network can take before its solution has diverged
+                wrong decisions made by the MLP.
+            max_steps: integer - maximum number of steps the MLP can take before its solution has diverged
         Returns:
             path: list[int] - list of literals traversed
             oracle_calls: list[boolean] - list of booleans corresponding to literals traversed,
                 denoting when the oracle was consulted for next literal.
             accuracy: list[boolean] - list of booleans corresponding to literals traversed, denoting
                 steps from which the agent predicted an incorrect next literal. If force_action is True,
-                accuracy still denotes when the policy network wanted to mistep, even though its actions are
+                accuracy still denotes when the MLP wanted to mistep, even though its actions are
                 forced to be correct.
         '''
         # Validate literals exist
@@ -514,11 +514,11 @@ class PolicyNetwork():
             target_encoding = np.zeros(self.num_literals)
             target_encoding[target_idx] = 1
 
-            # Get policy network prediction
-            prediction = self.policy.run(
+            # Get MLP prediction
+            prediction = self.mlp.run(
                 inputs={
-                    self.policy_source_input: source_encoding,
-                    self.policy_target_input: target_encoding
+                    self.mlp_source_input: source_encoding,
+                    self.mlp_target_input: target_encoding
                 }
             )
             predicted_literal_idx = np.argmax(prediction)
@@ -576,7 +576,7 @@ class PolicyNetwork():
             target: int or array - target literal (int) or one-hot encoding (array)
 
         Returns:
-            numpy array: policy network output prediction (action logits/probabilities over all literals)
+            numpy array: MLP output prediction (probabilities over all literals)
         """
         if isinstance(source, int) and isinstance(target, int):
             source_array = [0] * self.num_literals
@@ -590,48 +590,14 @@ class PolicyNetwork():
             source_array = source
             target_array = target
 
-        prediction = self.policy.run(
+        prediction = self.mlp.run(
             inputs={
-                self.policy_source_input: source_array,
-                self.policy_target_input: target_array
+                self.mlp_source_input: source_array,
+                self.mlp_target_input: target_array
             }
         )
         return prediction
     
-    def update_single(self, source_encoding, target_encoding, policy_target):
-        """
-        Perform a single learning update for one (state, goal, target) tuple.
-
-        Args:
-            source_encoding: np.array - one-hot encoding of current state
-            target_encoding: np.array - one-hot encoding of goal state
-            policy_target: np.array - soft target distribution over next states
-        """
-        self.policy.learn(
-            inputs={
-                self.policy_source_input: [source_encoding],
-                self.policy_target_input: [target_encoding],
-                self.target_node: [policy_target]
-            }
-        )
-    
-    def update_batch(self, source_encodings, target_encodings, policy_targets):
-        """
-        Perform a batch learning update for multiple (state, goal, target) tuples.
-
-        Args:
-            source_encodings: np.array - shape (batch_size, num_literals) of one-hot encodings for current states
-            target_encodings: np.array - shape (batch_size, num_literals) of one-hot encodings for goal states
-            policy_targets: np.array - shape (batch_size, num_literals) of soft target distributions over next states
-        """
-        self.policy.learn(
-            inputs={
-                self.policy_source_input: source_encodings,
-                self.policy_target_input: target_encodings,
-                self.target_node: policy_targets
-            }
-        )
-
     def _mse(self, predicted, actual):
         # Calculate the squared differences
         squared_errors = np.square(actual - predicted)

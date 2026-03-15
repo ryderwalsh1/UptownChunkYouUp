@@ -32,21 +32,26 @@ def load_graph(graph_path):
     return graph
 
 
-def load_weights_into_network(network, weights_dir, network_type='policy', epoch=None):
+def load_weight_matrices(weights_dir, network_type='policy', epoch=None):
     """
-    Load pre-trained weights into a PolicyNetwork or ValueNetwork.
+    Load pre-trained weight matrices from disk.
 
     Args:
-        network: PolicyNetwork or ValueNetwork - the network to load weights into
-        weights_dir: str - directory containing the weight .npy files
-        network_type: str - 'policy' or 'value' (used for naming)
+        weights_dir: str or None - directory containing the weight .npy files (None returns None)
+        network_type: str - 'policy' or 'value' (used for naming in flat directory format)
         epoch: int or None - specific epoch to load (None = latest epoch)
+
+    Returns:
+        tuple or None - (source_matrix, target_matrix, output_matrix) or None if weights_dir is None
 
     Expected files in weights_dir:
         - source_to_hidden/epoch_{N}.npy (or policy_source_to_hidden.npy)
         - target_to_hidden/epoch_{N}.npy (or policy_target_to_hidden.npy)
         - hidden_to_output/epoch_{N}.npy (or policy_hidden_to_output.npy)
     """
+    if weights_dir is None:
+        return None
+
     # Try to load from subdirectories first (mlp_basic_learner.py format)
     source_to_hidden_path = os.path.join(weights_dir, 'source_to_hidden')
     target_to_hidden_path = os.path.join(weights_dir, 'target_to_hidden')
@@ -98,12 +103,7 @@ def load_weights_into_network(network, weights_dir, network_type='policy', epoch
         output_matrix = np.load(os.path.join(weights_dir, f'{network_type}_hidden_to_output.npy'))
         print(f"Loaded final weights")
 
-    # Load weights into the network
-    network.source_to_hidden.matrix.base[:] = source_matrix
-    network.target_to_hidden.matrix.base[:] = target_matrix
-    network.hidden_to_output.matrix.base[:] = output_matrix
-
-    print(f"Loaded weights into {network_type} network from {weights_dir}")
+    return (source_matrix, target_matrix, output_matrix)
 
 
 # ============================================================================
@@ -224,22 +224,24 @@ def generate_trajectory_from_graph(source_literal, target_literal, graph):
 # Evaluation Functions
 # ============================================================================
 
-def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
+def test_loss_policy(policy_net, graph, num_vars, num_samples=None, fixed_source=None, fixed_target=None):
     """
-    Evaluate policy network accuracy on optimal trajectories.
+    Evaluate policy network loss (cross-entropy) on optimal trajectories.
 
-    Samples random (source, target) pairs, generates optimal trajectories,
-    and checks if policy's argmax action matches the optimal next literal
-    at each step (after action masking).
+    Evaluates all valid (source, target) pairs, generates optimal trajectories,
+    and computes the average cross-entropy loss between the policy's
+    predictions and the optimal actions at each step (after action masking).
 
     Args:
         policy_net: PolicyNetwork - trained policy network
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
-        num_samples: int - number of (source, target) pairs to sample
+        num_samples: int or None - ignored (kept for backward compatibility)
+        fixed_source: int or None - if provided with fixed_target, evaluate only this specific pair
+        fixed_target: int or None - if provided with fixed_source, evaluate only this specific pair
 
     Returns:
-        float - accuracy (correct predictions / total steps), higher is better
+        float - average cross-entropy loss (lower is better)
     """
     # Get all valid (source, target) pairs
     next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
@@ -248,12 +250,18 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
     if len(valid_pairs) == 0:
         return 0.0
 
-    total_steps = 0
-    correct_predictions = 0
+    # Determine which pairs to evaluate
+    if fixed_source is not None and fixed_target is not None:
+        # Evaluate only the specified fixed pair
+        pairs_to_evaluate = [(fixed_source, fixed_target)]
+    else:
+        # Evaluate all pairs
+        pairs_to_evaluate = valid_pairs
 
-    # Sample and evaluate
-    for sample in range(num_samples):
-        source_literal, target_literal = random.choice(valid_pairs)
+    losses = []
+
+    # Evaluate pairs
+    for source_literal, target_literal in pairs_to_evaluate:
 
         # Generate optimal trajectory
         trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
@@ -285,26 +293,27 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=50):
             # Apply action masking
             masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
 
-            # Get argmax action
-            predicted_idx = np.argmax(masked_dist)
-            predicted_literal = token_idx_to_literal(predicted_idx, num_vars)
+            # Get probability assigned to optimal action
+            optimal_idx = literal_to_token_idx(optimal_next_literal, num_vars)
+            optimal_prob = masked_dist[optimal_idx]
+
+            # Compute cross-entropy loss: -log(p(optimal_action))
+            # Add small epsilon to avoid log(0)
+            cross_entropy_loss = -np.log(optimal_prob + 1e-10)
+            losses.append(cross_entropy_loss)
 
             # Print predictions and targets
-            if sample == 0:  # Only print for the first sample to avoid clutter
-                print(f"  Step {t}: current={current_literal}, optimal_next={optimal_next_literal}")
-                print(f"    Network prediction (masked): {masked_dist}")
-                print(f"    Predicted literal: {predicted_literal}")
-                print(f"    Match: {predicted_literal == optimal_next_literal}")
+            # if current_literal == 5 and optimal_next_literal == -3:  # Print for a few samples of a specific pair
+            #     predicted_literal = token_idx_to_literal(np.argmax(masked_dist), num_vars)
+            #     print(f"  Step {t}: current={current_literal}, optimal_next={optimal_next_literal}")
+            #     print(f"    Network prediction (masked): {masked_dist}")
+            #     print(f"    Predicted literal: {predicted_literal}")
+            #     print(f"    Match: {predicted_literal == optimal_next_literal}")
 
-            # Check if prediction matches optimal action
-            total_steps += 1
-            if predicted_literal == optimal_next_literal:
-                correct_predictions += 1
-
-    if total_steps == 0:
+    if len(losses) == 0:
         return 0.0
 
-    return correct_predictions / total_steps
+    return np.mean(losses)
 
 
 def test_loss_value(value_net, graph, num_vars, num_samples=50):
@@ -451,6 +460,61 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 
 
 # ============================================================================
+# Teacher Forcing Training Functions
+# ============================================================================
+
+def train_policy(policy_net, trajectory, target_literal, num_vars):
+    """
+    Train policy network on a trajectory using episodic teacher forcing.
+    Updates are applied at every step during the episode, with the target
+    being the next literal in the optimal trajectory (one-hot encoded).
+    No action masking, no n-step returns, no value network bootstrapping.
+
+    Args:
+        policy_net: PolicyNetwork - policy network to train
+        trajectory: list[int] - sequence of literals from source to target (optimal path)
+        target_literal: int - goal literal
+        num_vars: int - number of variables
+    """
+    vocab_size = 2 * num_vars
+    target_idx = literal_to_token_idx(target_literal, num_vars)
+    target_encoding = np.zeros(vocab_size)
+    target_encoding[target_idx] = 1.0
+
+    # Prepare batch data for entire trajectory
+    source_encodings = []
+    target_encodings = []
+    policy_targets = []
+
+    # Collect all training examples from trajectory
+    for t in range(len(trajectory) - 1):
+        # Current state encoding
+        current_literal = trajectory[t]
+        current_idx = literal_to_token_idx(current_literal, num_vars)
+        source_encoding = np.zeros(vocab_size)
+        source_encoding[current_idx] = 1.0
+
+        # Create target distribution: one-hot at next literal in optimal path
+        next_literal = trajectory[t + 1]
+        next_idx = literal_to_token_idx(next_literal, num_vars)
+        policy_target = np.zeros(vocab_size)
+        policy_target[next_idx] = 1.0
+
+        # Collect for batch update
+        source_encodings.append(source_encoding)
+        target_encodings.append(target_encoding)
+        policy_targets.append(policy_target)
+
+    # Apply batch update for entire trajectory (matching mlpcomposition.py format)
+    if len(source_encodings) > 0:
+        policy_net.update_batch(
+            np.array(source_encodings),
+            np.array(target_encodings),
+            np.array(policy_targets)
+        )
+
+
+# ============================================================================
 # TD(n) Training Functions
 # ============================================================================
 
@@ -585,11 +649,150 @@ def train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars):
 
 
 # ============================================================================
+# Teacher Forcing Main Training Loop
+# ============================================================================
+
+def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
+                          max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
+                          training_mode='random_sampling', fixed_source=None, fixed_target=None):
+    """
+    Train policy network using episodic teacher forcing (no value network).
+
+    Args:
+        policy_net: PolicyNetwork - policy network to train
+        graph: nx.DiGraph - implication graph
+        num_vars: int - number of variables
+        num_episodes: int - number of training episodes
+        max_steps: int - maximum trajectory length to consider (skip if longer)
+        capture_interval: int - how often to capture weights, evaluate policy, and log progress
+        eval_episodes: int - number of episodes to run for policy evaluation
+        verbose: bool - whether to print progress
+        training_mode: str - 'random_sampling' (default) or 'fixed_pair'
+        fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
+        fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
+
+    Returns:
+        dict - training statistics (policy success_rate, avg_episode_length, policy_loss)
+    """
+    # Get all valid (source, target) pairs from next_steps
+    next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
+    valid_pairs = list(next_steps.keys())
+
+    print(f"Found {len(valid_pairs)} valid (source, target) pairs in graph")
+
+    if len(valid_pairs) == 0:
+        raise ValueError("No valid (source, target) pairs found in graph")
+
+    # Validate training mode and fixed pair arguments
+    if training_mode == 'fixed_pair':
+        if fixed_source is None or fixed_target is None:
+            raise ValueError("Both fixed_source and fixed_target must be provided when training_mode='fixed_pair'")
+
+        # Check if the fixed pair exists in valid pairs
+        if (fixed_source, fixed_target) not in valid_pairs:
+            raise ValueError(f"Fixed pair ({fixed_source}, {fixed_target}) is not a valid (source, target) pair in the graph")
+
+        # Verify there's a valid trajectory for the fixed pair
+        fixed_trajectory = generate_trajectory_from_graph(fixed_source, fixed_target, graph)
+        if fixed_trajectory is None or len(fixed_trajectory) > max_steps:
+            raise ValueError(f"No valid trajectory found for fixed pair ({fixed_source}, {fixed_target}) or trajectory exceeds max_steps")
+
+        print(f"Training on fixed pair: ({fixed_source}, {fixed_target}) with trajectory length {len(fixed_trajectory)}")
+    elif training_mode == 'random_sampling':
+        print(f"Training on random sampling from all valid pairs")
+    else:
+        raise ValueError(f"Invalid training_mode: {training_mode}. Must be 'random_sampling' or 'fixed_pair'")
+
+    # Tracking metrics for policy evaluation
+    policy_success_rates = []
+    policy_avg_lengths = []
+    captured_episodes = []
+    policy_losses = []
+
+    # Training loop
+    for episode in range(num_episodes):
+        # Select (source, target) pair based on training mode
+        if training_mode == 'fixed_pair':
+            # Use the fixed pair for all episodes
+            source_literal = fixed_source
+            target_literal = fixed_target
+            trajectory = fixed_trajectory  # Already validated above
+        else:  # random_sampling
+            # Sample random (source, target) pair until we get a valid trajectory
+            trajectory = None
+            while trajectory is None or len(trajectory) > max_steps:
+                source_literal, target_literal = random.choice(valid_pairs)
+                trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
+
+        # Train policy network on optimal trajectory (teacher forcing)
+        train_policy(policy_net, trajectory, target_literal, num_vars)
+
+        # Capture metrics and log at intervals
+        if (episode + 1) % capture_interval == 0:
+            captured_episodes.append(episode + 1)
+
+            # Evaluate policy on random episodes
+            eval_successes = 0
+            eval_lengths = []
+
+            for _ in range(eval_episodes):
+                eval_source, eval_target = random.choice(valid_pairs)
+                eval_trajectory, eval_reached_goal = run_episode(
+                    policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                )
+
+                if eval_reached_goal:
+                    eval_successes += 1
+                eval_lengths.append(len(eval_trajectory))
+
+            # Record policy evaluation metrics
+            policy_success_rate = eval_successes / eval_episodes
+            policy_success_rates.append(policy_success_rate)
+
+            policy_avg_length = np.mean(eval_lengths)
+            policy_avg_lengths.append(policy_avg_length)
+
+            # Capture network loss (use fixed pair if specified)
+            if training_mode == 'fixed_pair':
+                policy_loss = test_loss_policy(policy_net, graph, num_vars,
+                                               fixed_source=fixed_source, fixed_target=fixed_target)
+            else:
+                policy_loss = test_loss_policy(policy_net, graph, num_vars)
+            policy_losses.append(policy_loss)
+
+            # Log progress
+            if verbose:
+                print(f"Episode {episode + 1}/{num_episodes} | "
+                      f"Success: {policy_success_rate:.2%} | "
+                      f"Avg Len: {policy_avg_length:.1f} | "
+                      f"Policy Loss: {policy_loss:.4f}")
+
+    # Capture final weight matrices
+    final_policy_matrices = {
+        'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+        'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
+        'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
+    }
+
+    # Compute final statistics
+    stats = {
+        'policy_success_rates': policy_success_rates,
+        'policy_avg_lengths': policy_avg_lengths,
+        'captured_episodes': captured_episodes,
+        'policy_losses': policy_losses,
+        'final_policy_matrices': final_policy_matrices
+    }
+
+    return stats
+
+
+# ============================================================================
 # Main Training Loop
 # ============================================================================
 
 def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_steps=3,
-               max_steps=100, capture_interval=50, eval_episodes=10, verbose=True):
+               max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
+               training_mode='random_sampling', fixed_source=None, fixed_target=None):
     """
     Train policy and value networks using online TD(n).
 
@@ -604,6 +807,9 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         capture_interval: int - how often to capture weights, evaluate policy, and log progress
         eval_episodes: int - number of episodes to run for policy evaluation
         verbose: bool - whether to print progress
+        training_mode: str - 'random_sampling' (default) or 'fixed_pair'
+        fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
+        fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, etc.)
@@ -612,8 +818,30 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
     next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
     valid_pairs = list(next_steps.keys())
 
+    print(f"Found {len(valid_pairs)} valid (source, target) pairs in graph")
+
     if len(valid_pairs) == 0:
         raise ValueError("No valid (source, target) pairs found in graph")
+
+    # Validate training mode and fixed pair arguments
+    if training_mode == 'fixed_pair':
+        if fixed_source is None or fixed_target is None:
+            raise ValueError("Both fixed_source and fixed_target must be provided when training_mode='fixed_pair'")
+
+        # Check if the fixed pair exists in valid pairs
+        if (fixed_source, fixed_target) not in valid_pairs:
+            raise ValueError(f"Fixed pair ({fixed_source}, {fixed_target}) is not a valid (source, target) pair in the graph")
+
+        # Verify there's a valid trajectory for the fixed pair
+        fixed_trajectory = generate_trajectory_from_graph(fixed_source, fixed_target, graph)
+        if fixed_trajectory is None or len(fixed_trajectory) > max_steps:
+            raise ValueError(f"No valid trajectory found for fixed pair ({fixed_source}, {fixed_target}) or trajectory exceeds max_steps")
+
+        print(f"Training on fixed pair: ({fixed_source}, {fixed_target}) with trajectory length {len(fixed_trajectory)}")
+    elif training_mode == 'random_sampling':
+        print(f"Training on random sampling from all valid pairs")
+    else:
+        raise ValueError(f"Invalid training_mode: {training_mode}. Must be 'random_sampling' or 'fixed_pair'")
 
     # Tracking metrics for policy evaluation
     policy_success_rates = []
@@ -624,11 +852,18 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
 
     # Training loop
     for episode in range(num_episodes):
-        # Sample random (source, target) pair until we get a valid trajectory
-        trajectory = None
-        while trajectory is None or len(trajectory) > max_steps:
-            source_literal, target_literal = random.choice(valid_pairs)
-            trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
+        # Select (source, target) pair based on training mode
+        if training_mode == 'fixed_pair':
+            # Use the fixed pair for all episodes
+            source_literal = fixed_source
+            target_literal = fixed_target
+            trajectory = fixed_trajectory  # Already validated above
+        else:  # random_sampling
+            # Sample random (source, target) pair until we get a valid trajectory
+            trajectory = None
+            while trajectory is None or len(trajectory) > max_steps:
+                source_literal, target_literal = random.choice(valid_pairs)
+                trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
 
         # Train both networks on trajectory
         train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps, num_vars)
@@ -659,8 +894,12 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             policy_avg_length = np.mean(eval_lengths)
             policy_avg_lengths.append(policy_avg_length)
 
-            # Capture network losses
-            policy_loss = test_loss_policy(policy_net, graph, num_vars)
+            # Capture network losses (use fixed pair if specified)
+            if training_mode == 'fixed_pair':
+                policy_loss = test_loss_policy(policy_net, graph, num_vars,
+                                               fixed_source=fixed_source, fixed_target=fixed_target)
+            else:
+                policy_loss = test_loss_policy(policy_net, graph, num_vars)
             policy_losses.append(policy_loss)
 
             value_loss = test_loss_value(value_net, graph, num_vars)
@@ -671,7 +910,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
-                      f"Policy Acc: {policy_loss:.4f} | "
+                      f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
     # Capture final weight matrices
@@ -739,12 +978,13 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         for episode, loss in zip(stats['captured_episodes'], stats['policy_losses']):
             writer.writerow([episode, loss])
 
-    # Save value losses
-    with open(f'{save_dir}/metrics/{experiment_name}_value_losses.csv', 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['episode', 'loss'])
-        for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
-            writer.writerow([episode, loss])
+    # Save value losses (only if present, i.e., TD(n) mode)
+    if 'value_losses' in stats:
+        with open(f'{save_dir}/metrics/{experiment_name}_value_losses.csv', 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['episode', 'loss'])
+            for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
+                writer.writerow([episode, loss])
 
     # Save final policy weight matrices
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_source_to_hidden.npy',
@@ -754,13 +994,14 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_hidden_to_output.npy',
             stats['final_policy_matrices']['hidden_to_output'])
 
-    # Save final value weight matrices
-    np.save(f'{save_dir}/final_weights/{experiment_name}/value_source_to_hidden.npy',
-            stats['final_value_matrices']['source_to_hidden'])
-    np.save(f'{save_dir}/final_weights/{experiment_name}/value_target_to_hidden.npy',
-            stats['final_value_matrices']['target_to_hidden'])
-    np.save(f'{save_dir}/final_weights/{experiment_name}/value_hidden_to_output.npy',
-            stats['final_value_matrices']['hidden_to_output'])
+    # Save final value weight matrices (only if present, i.e., TD(n) mode)
+    if 'final_value_matrices' in stats:
+        np.save(f'{save_dir}/final_weights/{experiment_name}/value_source_to_hidden.npy',
+                stats['final_value_matrices']['source_to_hidden'])
+        np.save(f'{save_dir}/final_weights/{experiment_name}/value_target_to_hidden.npy',
+                stats['final_value_matrices']['target_to_hidden'])
+        np.save(f'{save_dir}/final_weights/{experiment_name}/value_hidden_to_output.npy',
+                stats['final_value_matrices']['hidden_to_output'])
 
     print(f"\nResults saved to {save_dir}/")
     print(f"  - Metrics: {save_dir}/metrics/{experiment_name}_*.csv")
@@ -772,41 +1013,59 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     Plot and save training curves (policy success rate, policy episode length, losses).
 
     Args:
-        stats: dict - statistics returned from train_td_n
+        stats: dict - statistics returned from train_td_n or train_teacher_forcing
         experiment_name: str - name for this experiment
         save_dir: str - directory to save plots
         show: bool - whether to display plots (default False, just save)
     """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Determine layout based on whether we have value network data
+    has_value_loss = 'value_losses' in stats
+
+    if has_value_loss:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # Policy success rate
-    axes[0, 0].plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
-    axes[0, 0].set_xlabel('Training Episode')
-    axes[0, 0].set_ylabel('Policy Success Rate')
-    axes[0, 0].set_title('Policy Success Rate over Training')
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].set_ylim([0, 1.05])
+    if has_value_loss:
+        ax_success = axes[0, 0]
+        ax_length = axes[0, 1]
+        ax_policy_loss = axes[1, 0]
+        ax_value_loss = axes[1, 1]
+    else:
+        ax_success = axes[0]
+        ax_length = axes[1]
+        ax_policy_loss = axes[2]
+
+    # Policy success rate
+    ax_success.plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
+    ax_success.set_xlabel('Training Episode')
+    ax_success.set_ylabel('Policy Success Rate')
+    ax_success.set_title('Policy Success Rate over Training')
+    ax_success.grid(True, alpha=0.3)
+    ax_success.set_ylim([0, 1.05])
 
     # Policy average episode length
-    axes[0, 1].plot(stats['captured_episodes'], stats['policy_avg_lengths'], 'g-', linewidth=2)
-    axes[0, 1].set_xlabel('Training Episode')
-    axes[0, 1].set_ylabel('Policy Average Episode Length')
-    axes[0, 1].set_title('Policy Average Episode Length over Training')
-    axes[0, 1].grid(True, alpha=0.3)
+    ax_length.plot(stats['captured_episodes'], stats['policy_avg_lengths'], 'g-', linewidth=2)
+    ax_length.set_xlabel('Training Episode')
+    ax_length.set_ylabel('Policy Average Episode Length')
+    ax_length.set_title('Policy Average Episode Length over Training')
+    ax_length.grid(True, alpha=0.3)
 
-    # Policy accuracy
-    axes[1, 0].plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
-    axes[1, 0].set_xlabel('Training Episode')
-    axes[1, 0].set_ylabel('Policy Accuracy')
-    axes[1, 0].set_title('Policy Network Accuracy over Training')
-    axes[1, 0].grid(True, alpha=0.3)
+    # Policy loss
+    ax_policy_loss.plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
+    ax_policy_loss.set_xlabel('Training Episode')
+    ax_policy_loss.set_ylabel('Policy Loss (Cross-Entropy)')
+    ax_policy_loss.set_title('Policy Network Loss over Training')
+    ax_policy_loss.grid(True, alpha=0.3)
 
-    # Value loss
-    axes[1, 1].plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
-    axes[1, 1].set_xlabel('Training Episode')
-    axes[1, 1].set_ylabel('Value Loss (MSE)')
-    axes[1, 1].set_title('Value Network Loss over Training')
-    axes[1, 1].grid(True, alpha=0.3)
+    # Value loss (only if present)
+    if has_value_loss:
+        ax_value_loss.plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
+        ax_value_loss.set_xlabel('Training Episode')
+        ax_value_loss.set_ylabel('Value Loss (MSE)')
+        ax_value_loss.set_title('Value Network Loss over Training')
+        ax_value_loss.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
@@ -831,95 +1090,177 @@ if __name__ == "__main__":
     # Configuration
     # ========================================================================
 
+    # Choose training mode: 'teacher_forcing' or 'td_n'
+    training_mode = 'td_n'
+
     # Implication graph parameters
-    num_vars = 8
-    num_clauses = 16
+    num_vars = 6
+    num_clauses = 10
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
-    # graph_path = 'results/graphs/impgraph_8v_10c/graph.pkl'
-    # graph = load_graph(graph_path)
-    # print(f"Loaded graph from {graph_path}")
+    graph_path = 'results/graphs/impgraph_6v_10c_teacher_forcing/graph.pkl'
+    graph = load_graph(graph_path)
+    print(f"Loaded graph from {graph_path}")
 
     # Option 2: Generate a new graph
-    graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
-    print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+    # graph = gen_impgraph.generate_implication_graph(num_vars, num_clauses)
+    # print(f"Generated new graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.5
+    policy_learning_rate = 0.1
     value_learning_rate = 0.5
 
-
-    # TD(n) hyperparameters
-    n_steps = 1  # Number of steps for TD(n): 1=TD(0), higher=more Monte Carlo
-
     # Number of training episodes
-    num_episodes = 500
+    num_episodes = 200
 
-    # Create experiment name
-    experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_n{n_steps}'
+    # ========================================================================
+    # Teacher Forcing Mode
+    # ========================================================================
+    if training_mode == 'teacher_forcing':
+        # Create experiment name
+        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_teacher_forcing'
 
-    # Save graph for reference
-    os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
-    with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
-        pickle.dump(graph, f)
-    print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
-    gen_impgraph.visualize_graph(graph)
-    plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
+        # Save graph for reference
+        os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+        with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+            pickle.dump(graph, f)
+        print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+        gen_impgraph.visualize_graph(graph)
+        plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
-    # Create networks
-    policy_net = PolicyNetwork(
-        num_vars=num_vars,
-        graph=graph,
-        policy_name='TDN_Policy',
-        hidden_size=hidden_size,
-        learning_rate=policy_learning_rate
-    )
+        # Option: Load pre-trained weights
+        # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
+        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy', epoch=450)
+        policy_weights = None  # Set to None for fresh start
 
-    value_net = ValueNetwork(
-        num_vars=num_vars,
-        graph=graph,
-        value_name='TDN_Value',
-        hidden_size=hidden_size,
-        learning_rate=value_learning_rate
-    )
+        # Create policy network (no value network needed for teacher forcing)
+        policy_net = PolicyNetwork(
+            num_vars=num_vars,
+            graph=graph,
+            policy_name='TeacherForcing_Policy',
+            hidden_size=hidden_size,
+            learning_rate=policy_learning_rate,
+            source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
+            target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
+            hidden_to_output_matrix=policy_weights[2] if policy_weights else None
+        )
 
-    # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
-    # Uncomment to load weights:
-    # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-    # load_weights_into_network(policy_net, policy_weights_dir, network_type='policy', epoch=495)
-    # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-    # load_weights_into_network(value_net, value_weights_dir, network_type='value')
+        print(f"Training with Teacher Forcing (Episodic)")
+        print(f"Graph: {num_vars} vars, {num_clauses} clauses")
+        print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+        print()
 
-    print(f"Training TD(n) with n={n_steps}")
-    print(f"Graph: {num_vars} vars, {num_clauses} clauses")
-    print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
-    print()
+        # Train using teacher forcing
+        stats = train_teacher_forcing(
+            policy_net=policy_net,
+            graph=graph,
+            num_vars=num_vars,
+            num_episodes=num_episodes,
+            max_steps=50,
+            capture_interval=10,
+            training_mode="fixed_pair",
+            fixed_source=-2,
+            fixed_target=4,
+            verbose=True
+        )
 
-    # Train
-    stats = train_td_n(
-        policy_net=policy_net,
-        value_net=value_net,
-        graph=graph,
-        num_vars=num_vars,
-        num_episodes=num_episodes,
-        n_steps=n_steps,
-        max_steps=50,
-        capture_interval=10,
-        verbose=True
-    )
+        print("\n" + "="*60)
+        print("Training Complete!")
+        if len(stats['policy_success_rates']) > 0:
+            print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
+            print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
+        print(f"Training Episodes: {num_episodes}")
+        print("="*60)
 
-    print("\n" + "="*60)
-    print("Training Complete!")
-    if len(stats['policy_success_rates']) > 0:
-        print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
-        print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
-    print(f"Training Episodes: {num_episodes}")
-    print("="*60)
+        # Save results
+        save_results(stats, experiment_name)
 
-    # Save results
-    save_results(stats, experiment_name)
+        # Plot training curves
+        plot_training_curves(stats, experiment_name)
 
-    # Plot training curves
-    plot_training_curves(stats, experiment_name)
+    # ========================================================================
+    # TD(n) Mode
+    # ========================================================================
+    elif training_mode == 'td_n':
+        # TD(n) hyperparameters
+        n_steps = 1  # Number of steps for TD(n): 1=TD(0), higher=more Monte Carlo
+
+        # Create experiment name
+        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_n{n_steps}'
+
+        # Save graph for reference
+        # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+        # with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+        #     pickle.dump(graph, f)
+        # print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+        # gen_impgraph.visualize_graph(graph)
+        # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
+
+        # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
+        # Uncomment to load weights:
+        # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
+        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy', epoch=450)
+        # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
+        # value_weights = load_weight_matrices(value_weights_dir, network_type='value')
+        policy_weights = None  # Set to None for fresh start
+        value_weights = None  # Set to None if not loading pretrained weights
+
+        # Create networks with optional pretrained weights
+        policy_net = PolicyNetwork(
+            num_vars=num_vars,
+            graph=graph,
+            policy_name='TDN_Policy',
+            hidden_size=hidden_size,
+            learning_rate=policy_learning_rate,
+            source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
+            target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
+            hidden_to_output_matrix=policy_weights[2] if policy_weights else None
+        )
+
+        value_net = ValueNetwork(
+            num_vars=num_vars,
+            graph=graph,
+            value_name='TDN_Value',
+            hidden_size=hidden_size,
+            learning_rate=value_learning_rate,
+            source_to_hidden_matrix=value_weights[0] if value_weights else None,
+            target_to_hidden_matrix=value_weights[1] if value_weights else None,
+            hidden_to_output_matrix=value_weights[2] if value_weights else None
+        )
+
+        print(f"Training TD(n) with n={n_steps}")
+        print(f"Graph: {num_vars} vars, {num_clauses} clauses")
+        print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+        print()
+
+        # Train
+        stats = train_td_n(
+            policy_net=policy_net,
+            value_net=value_net,
+            graph=graph,
+            num_vars=num_vars,
+            num_episodes=num_episodes,
+            n_steps=n_steps,
+            max_steps=50,
+            capture_interval=10,
+            verbose=True,
+            training_mode='fixed_pair',
+            fixed_source=-2,  # uncomment for fixed_pair mode
+            fixed_target=4    # uncomment for fixed_pair mode
+        )
+
+        print("\n" + "="*60)
+        print("Training Complete!")
+        if len(stats['policy_success_rates']) > 0:
+            print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
+            print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
+        print(f"Training Episodes: {num_episodes}")
+        print("="*60)
+
+        # Save results
+        save_results(stats, experiment_name)
+
+        # Plot training curves
+        plot_training_curves(stats, experiment_name)
