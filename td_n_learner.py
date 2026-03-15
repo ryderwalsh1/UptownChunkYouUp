@@ -1236,7 +1236,7 @@ if __name__ == "__main__":
     value_learning_rate = 0.5
 
     # Number of training episodes
-    num_episodes = 1500
+    num_episodes = 2000
 
     # ========================================================================
     # Teacher Forcing Mode
@@ -1286,6 +1286,7 @@ if __name__ == "__main__":
             training_mode="fixed_pair",
             fixed_source=15,
             fixed_target=14,
+            entropy_threshold=None,
             verbose=True
         )
 
