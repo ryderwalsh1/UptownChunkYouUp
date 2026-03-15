@@ -278,9 +278,9 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=None, fixed_source
             optimal_next_literal = trajectory[t + 1]
 
             # Get adjacent nodes for action masking
-            adjacent_literals = get_adjacent_nodes(current_literal, graph)
-            if len(adjacent_literals) == 0:
-                continue
+            # adjacent_literals = get_adjacent_nodes(current_literal, graph)
+            # if len(adjacent_literals) == 0:
+            #     continue
 
             # Create source encoding
             current_idx = literal_to_token_idx(current_literal, num_vars)
@@ -291,11 +291,11 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=None, fixed_source
             action_dist = policy_net.predict(source_encoding, target_encoding).flatten()
 
             # Apply action masking
-            masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
+            # masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
 
             # Get probability assigned to optimal action
             optimal_idx = literal_to_token_idx(optimal_next_literal, num_vars)
-            optimal_prob = masked_dist[optimal_idx]
+            optimal_prob = action_dist[optimal_idx]
 
             # Compute cross-entropy loss: -log(p(optimal_action))
             # Add small epsilon to avoid log(0)
@@ -412,26 +412,30 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         max_steps: int - maximum steps before termination
 
     Returns:
-        tuple: (trajectory, reached_goal)
+        tuple: (trajectory, reached_goal, avg_entropy)
             trajectory: list[int] - sequence of literals visited
             reached_goal: bool - whether target was reached
+            avg_entropy: float - average entropy of policy decisions across the episode
     """
     current_literal = source_literal
     trajectory = [source_literal]
+    entropies = []
 
     target_idx = literal_to_token_idx(target_literal, num_vars)
 
     for step in range(max_steps):
         # Check if we've reached the goal
         if current_literal == target_literal:
-            return trajectory, True
+            avg_entropy = np.mean(entropies) if len(entropies) > 0 else 0.0
+            return trajectory, True, avg_entropy
 
         # Get valid next nodes (adjacent in graph)
         adjacent_literals = get_adjacent_nodes(current_literal, graph)
 
         # If no valid moves, episode ends
-        if len(adjacent_literals) == 0:
-            return trajectory, False
+        # if len(adjacent_literals) == 0:
+        #     avg_entropy = np.mean(entropies) if len(entropies) > 0 else 0.0
+        #     return trajectory, False, avg_entropy
 
         # Create one-hot encodings
         current_idx = literal_to_token_idx(current_literal, num_vars)
@@ -444,11 +448,17 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         # Get policy prediction
         action_dist = policy_net.predict(source_encoding, target_encoding).flatten()
 
-        # Apply action masking
-        masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
+        # if step == 0:
+        #     print(f"Initial policy distribution for source {current_literal} to next -6:")
+        #     print(action_dist)
 
-        # Sample action from masked distribution
-        next_idx = np.random.choice(len(masked_dist), p=masked_dist)
+        # Compute entropy of the policy's action distribution (before masking)
+        entropy = policy_net._decision_entropy(action_dist)
+        entropies.append(entropy)
+
+
+        # Sample action from distribution
+        next_idx = np.random.choice(len(action_dist), p=action_dist)
         next_literal = token_idx_to_literal(next_idx, num_vars)
 
         # Update state
@@ -456,7 +466,9 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         trajectory.append(current_literal)
 
     # Max steps reached without reaching goal
-    return trajectory, False
+    avg_entropy = np.mean(entropies) if len(entropies) > 0 else 0.0
+
+    return trajectory, False, avg_entropy
 
 
 # ============================================================================
@@ -706,6 +718,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     # Tracking metrics for policy evaluation
     policy_success_rates = []
     policy_avg_lengths = []
+    policy_avg_entropies = []
     captured_episodes = []
     policy_losses = []
 
@@ -734,28 +747,33 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
             # Evaluate policy (use fixed pair if specified)
             eval_successes = 0
             eval_lengths = []
+            eval_entropies = []
 
             if training_mode == 'fixed_pair':
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
-                    eval_trajectory, eval_reached_goal = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
                     )
+
+                    print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
 
                     if eval_reached_goal:
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
+                    eval_entropies.append(eval_entropy)
             else:
                 # Evaluate on random episodes
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
-                    eval_trajectory, eval_reached_goal = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps
                     )
 
                     if eval_reached_goal:
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
+                    eval_entropies.append(eval_entropy)
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -763,6 +781,9 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 
             policy_avg_length = np.mean(eval_lengths)
             policy_avg_lengths.append(policy_avg_length)
+
+            policy_avg_entropy = np.mean(eval_entropies)
+            policy_avg_entropies.append(policy_avg_entropy)
 
             # Capture network loss (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -777,6 +798,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
+                      f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Policy Loss: {policy_loss:.4f}")
 
     # Capture final weight matrices
@@ -790,6 +812,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     stats = {
         'policy_success_rates': policy_success_rates,
         'policy_avg_lengths': policy_avg_lengths,
+        'policy_avg_entropies': policy_avg_entropies,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'final_policy_matrices': final_policy_matrices
@@ -858,6 +881,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
     # Tracking metrics for policy evaluation
     policy_success_rates = []
     policy_avg_lengths = []
+    policy_avg_entropies = []
     captured_episodes = []
     policy_losses = []
     value_losses = []
@@ -888,28 +912,31 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             # Evaluate policy (use fixed pair if specified)
             eval_successes = 0
             eval_lengths = []
+            eval_entropies = []
 
             if training_mode == 'fixed_pair':
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
-                    eval_trajectory, eval_reached_goal = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
                     )
 
                     if eval_reached_goal:
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
+                    eval_entropies.append(eval_entropy)
             else:
                 # Evaluate on random episodes
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
-                    eval_trajectory, eval_reached_goal = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps
                     )
 
                     if eval_reached_goal:
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
+                    eval_entropies.append(eval_entropy)
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -917,6 +944,9 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
 
             policy_avg_length = np.mean(eval_lengths)
             policy_avg_lengths.append(policy_avg_length)
+
+            policy_avg_entropy = np.mean(eval_entropies)
+            policy_avg_entropies.append(policy_avg_entropy)
 
             # Capture network losses (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -934,6 +964,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
+                      f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
@@ -953,6 +984,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
     stats = {
         'policy_success_rates': policy_success_rates,
         'policy_avg_lengths': policy_avg_lengths,
+        'policy_avg_entropies': policy_avg_entropies,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
@@ -994,6 +1026,13 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         writer.writerow(['episode', 'policy_avg_length'])
         for episode, length in zip(stats['captured_episodes'], stats['policy_avg_lengths']):
             writer.writerow([episode, length])
+
+    # Save policy average entropies
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_avg_entropies.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'policy_avg_entropy'])
+        for episode, entropy in zip(stats['captured_episodes'], stats['policy_avg_entropies']):
+            writer.writerow([episode, entropy])
 
     # Save policy losses
     with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
@@ -1046,20 +1085,22 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     has_value_loss = 'value_losses' in stats
 
     if has_value_loss:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # Policy success rate
     if has_value_loss:
         ax_success = axes[0, 0]
         ax_length = axes[0, 1]
+        ax_entropy = axes[0, 2]
         ax_policy_loss = axes[1, 0]
         ax_value_loss = axes[1, 1]
     else:
-        ax_success = axes[0]
-        ax_length = axes[1]
-        ax_policy_loss = axes[2]
+        ax_success = axes[0, 0]
+        ax_length = axes[0, 1]
+        ax_entropy = axes[1, 0]
+        ax_policy_loss = axes[1, 1]
 
     # Policy success rate
     ax_success.plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
@@ -1075,6 +1116,13 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     ax_length.set_ylabel('Policy Average Episode Length')
     ax_length.set_title('Policy Average Episode Length over Training')
     ax_length.grid(True, alpha=0.3)
+
+    # Policy average entropy
+    ax_entropy.plot(stats['captured_episodes'], stats['policy_avg_entropies'], 'orange', linewidth=2)
+    ax_entropy.set_xlabel('Training Episode')
+    ax_entropy.set_ylabel('Policy Average Entropy')
+    ax_entropy.set_title('Policy Average Entropy over Training')
+    ax_entropy.grid(True, alpha=0.3)
 
     # Policy loss
     ax_policy_loss.plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
@@ -1118,12 +1166,12 @@ if __name__ == "__main__":
     training_mode = 'teacher_forcing'
 
     # Implication graph parameters
-    num_vars = 6
-    num_clauses = 10
+    num_vars = 16
+    num_clauses = 25
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
-    graph_path = 'results/graphs/impgraph_6v_10c_teacher_forcing/graph.pkl'
+    graph_path = f'results/graphs/impgraph_{num_vars}v_{num_clauses}c_{training_mode}/graph.pkl'
     graph = load_graph(graph_path)
     print(f"Loaded graph from {graph_path}")
 
@@ -1137,7 +1185,7 @@ if __name__ == "__main__":
     value_learning_rate = 0.5
 
     # Number of training episodes
-    num_episodes = 200
+    num_episodes = 1000
 
     # ========================================================================
     # Teacher Forcing Mode
@@ -1182,11 +1230,11 @@ if __name__ == "__main__":
             graph=graph,
             num_vars=num_vars,
             num_episodes=num_episodes,
-            max_steps=50,
+            max_steps=5,
             capture_interval=10,
             training_mode="fixed_pair",
-            fixed_source=-2,
-            fixed_target=4,
+            fixed_source=15,
+            fixed_target=14,
             verbose=True
         )
 
