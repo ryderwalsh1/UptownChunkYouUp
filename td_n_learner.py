@@ -399,9 +399,9 @@ def test_loss_value(value_net, graph, num_vars, num_samples=50):
 # Policy Evaluation
 # ============================================================================
 
-def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5):
+def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, transition_sharpness=5.0):
     """
-    Execute one episode from source to target using the policy network with action masking.
+    Execute one episode from source to target using the policy network with entropy-based mixing.
 
     Args:
         policy_net: PolicyNetwork - trained policy network
@@ -410,8 +410,9 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
         max_steps: int - maximum steps before termination
-        entropy_threshold: float or None - if set, policy takes optimal action (argmax) when entropy
-                                           is above this threshold; if None, always samples from distribution
+        entropy_threshold: float or None - center point for entropy-based mixing; if None, always samples
+                                           from policy distribution without mixing
+        transition_sharpness: float - controls steepness of sigmoid transition (higher = sharper)
 
     Returns:
         tuple: (trajectory, reached_goal, avg_entropy)
@@ -458,19 +459,37 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         entropy = policy_net._decision_entropy(action_dist)
         entropies.append(entropy)
 
-        # Choose action: apply entropy-gating if threshold is set
-        if entropy_threshold is not None and entropy > entropy_threshold:
-            # Entropy is high (uncertain), take optimal action from graph
+        # Choose action: apply entropy-based mixing if threshold is set
+        if entropy_threshold is not None:
+            # Compute mixing weight using sigmoid: p(use_policy) = σ(k · (H_threshold - H_current))
+            # When H_current > H_threshold: weight approaches 0 (use memory)
+            # When H_current < H_threshold: weight approaches 1 (use policy)
+            def sigmoid(x):
+                return 1.0 / (1.0 + np.exp(-x))
+
+            policy_weight = sigmoid(transition_sharpness * (entropy_threshold - entropy))
+
+            # Get optimal action distribution (one-hot at optimal next literal)
             optimal_trajectory = generate_trajectory_from_graph(current_literal, target_literal, graph)
             if optimal_trajectory is not None and len(optimal_trajectory) > 1:
-                # Take the next step from optimal trajectory
                 optimal_next_literal = optimal_trajectory[1]
-                next_idx = literal_to_token_idx(optimal_next_literal, num_vars)
+                optimal_idx = literal_to_token_idx(optimal_next_literal, num_vars)
+                optimal_dist = np.zeros_like(action_dist)
+                optimal_dist[optimal_idx] = 1.0
             else:
-                # No optimal path found, fallback to sampling
-                next_idx = np.random.choice(len(action_dist), p=action_dist)
+                # No optimal path found, fallback to policy only
+                optimal_dist = action_dist.copy()
+
+            # Mix distributions: mixed_dist = policy_weight * policy + (1 - policy_weight) * optimal
+            mixed_dist = policy_weight * action_dist + (1.0 - policy_weight) * optimal_dist
+
+            # Renormalize (should already sum to 1, but ensure numerical stability)
+            mixed_dist = mixed_dist / np.sum(mixed_dist)
+
+            # Sample from mixed distribution
+            next_idx = np.random.choice(len(mixed_dist), p=mixed_dist)
         else:
-            # Entropy is low or no threshold set, sample from distribution
+            # No threshold set, sample from policy distribution
             next_idx = np.random.choice(len(action_dist), p=action_dist)
 
         next_literal = token_idx_to_literal(next_idx, num_vars)
@@ -680,7 +699,8 @@ def train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars):
 
 def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                           max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
-                          training_mode='random_sampling', fixed_source=None, fixed_target=None):
+                          training_mode='random_sampling', fixed_source=None, fixed_target=None,
+                          entropy_threshold=1.5, transition_sharpness=5.0):
     """
     Train policy network using episodic teacher forcing (no value network).
 
@@ -696,6 +716,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         training_mode: str - 'random_sampling' (default) or 'fixed_pair'
         fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
         fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
+        entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
+        transition_sharpness: float - controls steepness of sigmoid transition (default 5.0)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, policy_loss)
@@ -767,7 +789,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
                     eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
-                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
+                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
+                        entropy_threshold, transition_sharpness
                     )
 
                     # print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
@@ -781,7 +804,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
                     eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
-                        policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                        policy_net, eval_source, eval_target, graph, num_vars, max_steps,
+                        entropy_threshold, transition_sharpness
                     )
 
                     if eval_reached_goal:
@@ -829,7 +853,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         'policy_avg_entropies': policy_avg_entropies,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
-        'final_policy_matrices': final_policy_matrices
+        'final_policy_matrices': final_policy_matrices,
+        'entropy_threshold': entropy_threshold
     }
 
     return stats
@@ -841,7 +866,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 
 def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_steps=3,
                max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
-               training_mode='random_sampling', fixed_source=None, fixed_target=None):
+               training_mode='random_sampling', fixed_source=None, fixed_target=None,
+               entropy_threshold=1.5, transition_sharpness=5.0):
     """
     Train policy and value networks using online TD(n).
 
@@ -859,6 +885,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         training_mode: str - 'random_sampling' (default) or 'fixed_pair'
         fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
         fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
+        entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
+        transition_sharpness: float - controls steepness of sigmoid transition (default 5.0)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, etc.)
@@ -932,7 +960,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
                     eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
-                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps
+                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
+                        entropy_threshold, transition_sharpness
                     )
 
                     if eval_reached_goal:
@@ -944,7 +973,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
                     eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
-                        policy_net, eval_source, eval_target, graph, num_vars, max_steps
+                        policy_net, eval_source, eval_target, graph, num_vars, max_steps,
+                        entropy_threshold, transition_sharpness
                     )
 
                     if eval_reached_goal:
@@ -1003,7 +1033,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         'policy_losses': policy_losses,
         'value_losses': value_losses,
         'final_policy_matrices': final_policy_matrices,
-        'final_value_matrices': final_value_matrices
+        'final_value_matrices': final_value_matrices,
+        'entropy_threshold': entropy_threshold
     }
 
     return stats
@@ -1133,6 +1164,12 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
 
     # Policy average entropy
     ax_entropy.plot(stats['captured_episodes'], stats['policy_avg_entropies'], 'orange', linewidth=2)
+
+    # Add dashed line for entropy threshold if it exists
+    if 'entropy_threshold' in stats and stats['entropy_threshold'] is not None:
+        ax_entropy.axhline(y=stats['entropy_threshold'], color='red', linestyle='--', linewidth=2, label=f'Threshold = {stats["entropy_threshold"]:.2f}')
+        ax_entropy.legend()
+
     ax_entropy.set_xlabel('Training Episode')
     ax_entropy.set_ylabel('Policy Average Entropy')
     ax_entropy.set_title('Policy Average Entropy over Training')
@@ -1199,7 +1236,7 @@ if __name__ == "__main__":
     value_learning_rate = 0.5
 
     # Number of training episodes
-    num_episodes = 1200
+    num_episodes = 1500
 
     # ========================================================================
     # Teacher Forcing Mode
