@@ -686,13 +686,17 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 
     # Tracking metrics for policy evaluation
     policy_success_rates = []
-    policy_avg_lengths = []
+    policy_avg_lengths = []  # Running average
+    policy_block_lengths = []  # Per-evaluation-block average
     policy_avg_entropies = []
     policy_chunkabilities = []
     policy_oracle_call_probs = []
     policy_lambdas = []
     captured_episodes = []
     policy_losses = []
+
+    # Running average for episode lengths
+    all_eval_lengths = []
 
     # Training loop
     for episode in range(num_episodes):
@@ -759,7 +763,12 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
             policy_success_rate = eval_successes / eval_episodes
             policy_success_rates.append(policy_success_rate)
 
-            policy_avg_length = np.mean(eval_lengths)
+            # Record both per-block and running average for episode lengths
+            policy_block_length = np.mean(eval_lengths)
+            policy_block_lengths.append(policy_block_length)
+
+            all_eval_lengths.extend(eval_lengths)
+            policy_avg_length = np.mean(all_eval_lengths)
             policy_avg_lengths.append(policy_avg_length)
 
             policy_avg_entropy = np.mean(eval_entropies)
@@ -816,7 +825,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     # Compute final statistics
     stats = {
         'policy_success_rates': policy_success_rates,
-        'policy_avg_lengths': policy_avg_lengths,
+        'policy_avg_lengths': policy_avg_lengths,  # Running average
+        'policy_block_lengths': policy_block_lengths,  # Per-block average
         'policy_avg_entropies': policy_avg_entropies,
         'policy_chunkabilities': policy_chunkabilities,
         'policy_oracle_call_probs': policy_oracle_call_probs,
@@ -893,7 +903,8 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
 
     # Tracking metrics for policy evaluation
     policy_success_rates = []
-    policy_avg_lengths = []
+    policy_avg_lengths = []  # Running average
+    policy_block_lengths = []  # Per-evaluation-block average
     policy_avg_entropies = []
     policy_chunkabilities = []
     policy_oracle_call_probs = []
@@ -901,6 +912,9 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
     captured_episodes = []
     policy_losses = []
     value_losses = []
+
+    # Running average for episode lengths
+    all_eval_lengths = []
 
     # Training loop
     for episode in range(num_episodes):
@@ -965,7 +979,12 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
             policy_success_rate = eval_successes / eval_episodes
             policy_success_rates.append(policy_success_rate)
 
-            policy_avg_length = np.mean(eval_lengths)
+            # Record both per-block and running average for episode lengths
+            policy_block_length = np.mean(eval_lengths)
+            policy_block_lengths.append(policy_block_length)
+
+            all_eval_lengths.extend(eval_lengths)
+            policy_avg_length = np.mean(all_eval_lengths)
             policy_avg_lengths.append(policy_avg_length)
 
             policy_avg_entropy = np.mean(eval_entropies)
@@ -977,7 +996,7 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
             policy_avg_oracle_call_prob = 1.0 - np.mean(eval_confidences)
             policy_oracle_call_probs.append(policy_avg_oracle_call_prob)
 
-            # Compute lambda statistic: lambda = chunkability^superlinearity
+            # Compute lambda statistic: lambda = chunkability^lambda_exponent
             policy_lambda = policy_avg_chunkability ** lambda_exponent
             policy_lambdas.append(policy_lambda)
 
@@ -1039,7 +1058,8 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
     # Compute final statistics
     stats = {
         'policy_success_rates': policy_success_rates,
-        'policy_avg_lengths': policy_avg_lengths,
+        'policy_avg_lengths': policy_avg_lengths,  # Running average
+        'policy_block_lengths': policy_block_lengths,  # Per-block average
         'policy_avg_entropies': policy_avg_entropies,
         'policy_chunkabilities': policy_chunkabilities,
         'policy_oracle_call_probs': policy_oracle_call_probs,
@@ -1208,12 +1228,15 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     ax_success.grid(True, alpha=0.3)
     ax_success.set_ylim([0, 1.05])
 
-    # Policy average episode length
-    ax_length.plot(stats['captured_episodes'], stats['policy_avg_lengths'], 'g-', linewidth=2)
+    # Policy average episode length (both per-block and running average)
+    if 'policy_block_lengths' in stats:
+        ax_length.plot(stats['captured_episodes'], stats['policy_block_lengths'], 'g--', linewidth=1.5, alpha=0.6, label='Per-Block Avg')
+    ax_length.plot(stats['captured_episodes'], stats['policy_avg_lengths'], 'g-', linewidth=2, label='Running Avg')
     ax_length.set_xlabel('Training Episode')
     ax_length.set_ylabel('Policy Average Episode Length')
     ax_length.set_title('Policy Average Episode Length over Training')
     ax_length.grid(True, alpha=0.3)
+    ax_length.legend()
 
     # Policy average entropy
     ax_entropy.plot(stats['captured_episodes'], stats['policy_avg_entropies'], 'orange', linewidth=2)
@@ -1392,7 +1415,7 @@ if __name__ == "__main__":
         gamma = 0.99  # Discount factor
         lambda_exponent = 2.5  # Lambda modulation: λ = chunkability^lambda_exponent
         oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
-        entropy_threshold = 0.75  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
+        entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
         # Create experiment name
         experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
