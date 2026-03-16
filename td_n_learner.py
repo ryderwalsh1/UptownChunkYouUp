@@ -1333,11 +1333,11 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.32
-    value_learning_rate = 0.5
+    policy_learning_rate = 0.2
+    value_learning_rate = 0.8
 
     # Number of training episodes
-    num_episodes = 3000
+    num_episodes = 10000
 
     # ========================================================================
     # Teacher Forcing Mode
@@ -1413,9 +1413,9 @@ if __name__ == "__main__":
     elif training_mode == 'td_n':
         # TD(λ) hyperparameters
         gamma = 0.99  # Discount factor
-        lambda_exponent = 2.5  # Lambda modulation: λ = chunkability^lambda_exponent
-        oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
-        entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
+        lambda_exponent = 3  # Lambda modulation: λ = chunkability^lambda_exponent
+        oracle_sensitivity = 10.0  # Controls steepness of sigmoid transition for oracle calls
+        entropy_threshold = 0.4  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
         # Create experiment name
         experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
