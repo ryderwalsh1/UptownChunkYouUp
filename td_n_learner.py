@@ -5,6 +5,7 @@ import pickle
 import gen_impgraph
 import networkx as nx
 from policy_network import PolicyNetwork
+from policy_network_pc import PolicyNetworkPC
 from value_network import ValueNetwork
 import matplotlib.pyplot as plt
 import csv
@@ -839,12 +840,28 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Policy Loss: {policy_loss:.4f}")
 
-    # Capture final weight matrices
-    final_policy_matrices = {
-        'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
-        'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
-        'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
-    }
+    # Capture final weight matrices (no target_to_hidden for fixed-goal policy)
+    if isinstance(policy_net, PolicyNetworkPC):
+        # For PolicyNetworkPC, extract from PyTorch model
+        if policy_net.use_predictive_coding:
+            # Model structure: Linear -> PCLayer -> Sigmoid -> Linear -> PCLayer
+            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
+            hidden_to_output = policy_net.model[3].weight.data.T.cpu().numpy()
+        else:
+            # Model structure: Linear -> Sigmoid -> Linear
+            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
+            hidden_to_output = policy_net.model[2].weight.data.T.cpu().numpy()
+
+        final_policy_matrices = {
+            'source_to_hidden': source_to_hidden.copy(),
+            'hidden_to_output': hidden_to_output.copy()
+        }
+    else:
+        # For PolicyNetwork, extract from PsyNeuLink
+        final_policy_matrices = {
+            'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+            'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
+        }
 
     # Compute final statistics
     stats = {
@@ -1012,12 +1029,29 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
-    # Capture final weight matrices
-    final_policy_matrices = {
-        'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
-        'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
-        'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
-    }
+    # Capture final weight matrices (no target_to_hidden for fixed-goal policy)
+    if isinstance(policy_net, PolicyNetworkPC):
+        # For PolicyNetworkPC, extract from PyTorch model
+        if policy_net.use_predictive_coding:
+            # Model structure: Linear -> PCLayer -> Sigmoid -> Linear -> PCLayer
+            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
+            hidden_to_output = policy_net.model[3].weight.data.T.cpu().numpy()
+        else:
+            # Model structure: Linear -> Sigmoid -> Linear
+            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
+            hidden_to_output = policy_net.model[2].weight.data.T.cpu().numpy()
+
+        final_policy_matrices = {
+            'source_to_hidden': source_to_hidden.copy(),
+            'hidden_to_output': hidden_to_output.copy()
+        }
+    else:
+        # For PolicyNetwork, extract from PsyNeuLink
+        final_policy_matrices = {
+            'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+            'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
+        }
+
     final_value_matrices = {
         'source_to_hidden': value_net.source_to_hidden.matrix.base.copy(),
         'target_to_hidden': value_net.target_to_hidden.matrix.base.copy(),
@@ -1094,7 +1128,7 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
             for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
                 writer.writerow([episode, loss])
 
-    # Save final policy weight matrices
+    # Save final policy weight matrices (no target_to_hidden for fixed-goal policy)
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_source_to_hidden.npy',
             stats['final_policy_matrices']['source_to_hidden'])
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_target_to_hidden.npy',
@@ -1259,7 +1293,7 @@ if __name__ == "__main__":
         policy_weights = None  # Set to None for fresh start
 
         # Create policy network (no value network needed for teacher forcing)
-        policy_net = PolicyNetwork(
+        policy_net = PolicyNetworkPC(
             num_vars=num_vars,
             graph=graph,
             policy_name='TeacherForcing_Policy',
@@ -1283,6 +1317,7 @@ if __name__ == "__main__":
             num_episodes=num_episodes,
             max_steps=5,
             capture_interval=10,
+            eval_episodes=50,
             training_mode="fixed_pair",
             fixed_source=15,
             fixed_target=14,
