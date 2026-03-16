@@ -59,3 +59,39 @@ def lambda_labels(
 
     return labels
 
+def lambda_values(
+    rewards: np.ndarray,       # reward at each step (e.g., [0, 0, 0, 1])
+    values: np.ndarray,        # current value estimates V(s_t) from the network
+    gamma: float = 0.99,       # discount factor
+    lambda_: float = 1.0
+) -> np.ndarray:
+    """
+    Computes TD(lambda) scalar value targets via backward accumulation.
+    
+    - lambda_ = 0: target_t = r_{t+1} + gamma * V(s_{t+1})        [TD(0)]
+    - lambda_ = 1: target_t = r_{t+1} + gamma*r_{t+2} + ... + gamma^n * R_T  [Monte Carlo]
+    - 0 < lambda_ < 1: exponential blend of n-step returns
+    """
+    seq_len = len(rewards)
+    targets = np.zeros(seq_len, dtype=np.float32)
+    
+    # Bootstrap from the terminal value (0 if episode ends)
+    carry = 0.0
+    
+    for t in range(seq_len - 1, -1, -1):
+        if t == seq_len - 1:
+            # Terminal step: target is just the reward
+            targets[t] = rewards[t]
+            carry = rewards[t]
+        else:
+            # TD(0) target: one-step bootstrap
+            td0_target = rewards[t] + gamma * values[t + 1]
+            
+            # Monte Carlo direction: use the carry
+            mc_target = rewards[t] + gamma * carry
+            
+            # Blend
+            targets[t] = (1.0 - lambda_) * td0_target + lambda_ * mc_target
+            carry = targets[t]
+    
+    return targets
