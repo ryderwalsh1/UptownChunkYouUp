@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import gen_impgraph
+from lambda_labels import lambda_values
 import sys
 import os
 
@@ -107,15 +108,28 @@ class PolicyNetworkPC():
             self.pc_layer1 = pc.PCLayer()
             self.activation = nn.Sigmoid()
 
-            # Output pathway
+            # Policy output pathway
             self.output_linear = nn.Linear(self.hidden_size, self.num_literals, bias=False)
             self.output_linear.weight.data = w_out.T
 
             self.pc_layer2 = pc.PCLayer()
 
-            # Create a custom forward function that handles dual inputs
+            # Value output pathway (shares hidden layer)
+            hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
+            if hidden_to_value_matrix is not None:
+                w_value = torch.tensor(hidden_to_value_matrix, dtype=torch.float32)
+            else:
+                w_value = torch.tensor(0.02 * np.random.rand(self.hidden_size, 1) - 0.01, dtype=torch.float32)
+
+            self.value_linear = nn.Linear(self.hidden_size, 1, bias=False)
+            self.value_linear.weight.data = w_value.T
+
+            self.pc_layer_value = pc.PCLayer()
+
+            # Create a custom forward function that handles dual inputs and dual outputs
             class DualInputPCModel(nn.Module):
-                def __init__(self, source_linear, target_linear, pc_layer1, activation, output_linear, pc_layer2):
+                def __init__(self, source_linear, target_linear, pc_layer1, activation,
+                             output_linear, pc_layer2, value_linear, pc_layer_value):
                     super().__init__()
                     self.source_linear = source_linear
                     self.target_linear = target_linear
@@ -123,8 +137,10 @@ class PolicyNetworkPC():
                     self.activation = activation
                     self.output_linear = output_linear
                     self.pc_layer2 = pc_layer2
+                    self.value_linear = value_linear
+                    self.pc_layer_value = pc_layer_value
 
-                def forward(self, x):
+                def forward(self, x, return_value=False):
                     # x is expected to be concatenated [source, target]
                     # Split the input
                     source_input = x[:, :self.source_linear.in_features]
@@ -135,15 +151,24 @@ class PolicyNetworkPC():
                     target_hidden = self.target_linear(target_input)
                     combined_hidden = source_hidden + target_hidden
 
-                    # Continue through the network
+                    # Shared hidden representation
                     hidden = self.pc_layer1(combined_hidden)
                     hidden = self.activation(hidden)
-                    output = self.output_linear(hidden)
-                    output = self.pc_layer2(output)
-                    return output
+
+                    if return_value:
+                        # Return value output
+                        value = self.value_linear(hidden)
+                        value = self.pc_layer_value(value)
+                        return value
+                    else:
+                        # Return policy output (default)
+                        output = self.output_linear(hidden)
+                        output = self.pc_layer2(output)
+                        return output
 
             self.model = DualInputPCModel(self.source_linear, self.target_linear, self.pc_layer1,
-                                          self.activation, self.output_linear, self.pc_layer2)
+                                          self.activation, self.output_linear, self.pc_layer2,
+                                          self.value_linear, self.pc_layer_value)
 
             # Create PC trainer
             self.pc_trainer = pc_trainer.PCTrainer(
@@ -170,15 +195,26 @@ class PolicyNetworkPC():
             self.output_linear = nn.Linear(self.hidden_size, self.num_literals, bias=False)
             self.output_linear.weight.data = w_out.T
 
+            # Value output pathway (shares hidden layer)
+            hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
+            if hidden_to_value_matrix is not None:
+                w_value = torch.tensor(hidden_to_value_matrix, dtype=torch.float32)
+            else:
+                w_value = torch.tensor(0.02 * np.random.rand(self.hidden_size, 1) - 0.01, dtype=torch.float32)
+
+            self.value_linear = nn.Linear(self.hidden_size, 1, bias=False)
+            self.value_linear.weight.data = w_value.T
+
             class DualInputModel(nn.Module):
-                def __init__(self, source_linear, target_linear, activation, output_linear):
+                def __init__(self, source_linear, target_linear, activation, output_linear, value_linear):
                     super().__init__()
                     self.source_linear = source_linear
                     self.target_linear = target_linear
                     self.activation = activation
                     self.output_linear = output_linear
+                    self.value_linear = value_linear
 
-                def forward(self, x):
+                def forward(self, x, return_value=False):
                     # x is expected to be concatenated [source, target]
                     source_input = x[:, :self.source_linear.in_features]
                     target_input = x[:, self.source_linear.in_features:]
@@ -188,10 +224,18 @@ class PolicyNetworkPC():
                     combined_hidden = source_hidden + target_hidden
 
                     hidden = self.activation(combined_hidden)
-                    output = self.output_linear(hidden)
-                    return output
 
-            self.model = DualInputModel(self.source_linear, self.target_linear, self.activation, self.output_linear)
+                    if return_value:
+                        # Return value output
+                        value = self.value_linear(hidden)
+                        return value
+                    else:
+                        # Return policy output (default)
+                        output = self.output_linear(hidden)
+                        return output
+
+            self.model = DualInputModel(self.source_linear, self.target_linear, self.activation,
+                                        self.output_linear, self.value_linear)
 
             self.optimizer = optim.SGD(self.model.parameters(), lr=self.learning_rate)
 
@@ -715,3 +759,311 @@ class PolicyNetworkPC():
             loss = torch.mean((output_softmax - policy_target_tensor)**2)
             loss.backward()
             self.optimizer.step()
+
+    # ========================================================================
+    # Value Head Methods
+    # ========================================================================
+
+    def compute_value(self, source_literal, target_literal):
+        """
+        Compute value estimate for a single (state, goal) pair.
+
+        Args:
+            source_literal: int - current state literal
+            target_literal: int - goal literal
+
+        Returns:
+            float - scalar value estimate
+        """
+        # Create one-hot encodings
+        source_idx = self.literal_to_idx(source_literal)
+        source_encoding = np.zeros(self.num_literals)
+        source_encoding[source_idx] = 1.0
+
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        # Convert to tensors
+        source_tensor = torch.from_numpy(np.array([source_encoding], dtype=np.float32)).to(self.device)
+        target_tensor = torch.from_numpy(np.array([target_encoding], dtype=np.float32)).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+
+        # Store current training state
+        was_training = self.model.training
+
+        self.model.eval()
+        with torch.no_grad():
+            value = self.model(combined_tensor, return_value=True)
+
+        # Restore previous training state
+        if was_training:
+            self.model.train()
+
+        return float(value[0, 0].cpu().item())
+
+    def compute_trajectory_values(self, path, target_literal):
+        """
+        Compute value estimates for all states in a trajectory.
+
+        Args:
+            path: list[int] - trajectory of literals
+            target_literal: int - goal literal
+
+        Returns:
+            np.array - value estimates for each state in path, shape (len(path),)
+        """
+        values = np.zeros(len(path))
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        # Store current training state
+        was_training = self.model.training
+
+        self.model.eval()
+        with torch.no_grad():
+            for i, literal in enumerate(path):
+                source_idx = self.literal_to_idx(literal)
+                source_encoding = np.zeros(self.num_literals)
+                source_encoding[source_idx] = 1.0
+
+                # Convert to tensors
+                source_tensor = torch.from_numpy(np.array([source_encoding], dtype=np.float32)).to(self.device)
+                target_tensor = torch.from_numpy(np.array([target_encoding], dtype=np.float32)).to(self.device)
+                combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+
+                # Get value
+                value = self.model(combined_tensor, return_value=True)
+                values[i] = float(value[0, 0].cpu().item())
+
+        # Restore previous training state
+        if was_training:
+            self.model.train()
+
+        return values
+
+    def chunkability_from_trajectory(self, path, target_literal):
+        """
+        Compute chunkability (corridor-likeness) of a trajectory.
+
+        Uses the policy head's entropy to measure how deterministic the policy is.
+        Chunkability = mean(1 / exp(H_t)) across trajectory steps.
+
+        Args:
+            path: list[int] - trajectory of literals
+            target_literal: int - goal literal
+
+        Returns:
+            float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
+        """
+        if len(path) <= 1:
+            return 0.0
+
+        entropies = []
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        # Store current training state
+        was_training = self.model.training
+
+        self.model.eval()
+        with torch.no_grad():
+            # Compute entropy at each step (excluding the final state)
+            for i in range(len(path) - 1):
+                source_idx = self.literal_to_idx(path[i])
+                source_encoding = np.zeros(self.num_literals)
+                source_encoding[source_idx] = 1.0
+
+                # Convert to tensors
+                source_tensor = torch.from_numpy(np.array([source_encoding], dtype=np.float32)).to(self.device)
+                target_tensor = torch.from_numpy(np.array([target_encoding], dtype=np.float32)).to(self.device)
+                combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+
+                # Get policy prediction
+                prediction = self.model(combined_tensor, return_value=False)
+                prediction = torch.softmax(prediction * 10.0, dim=1)
+
+                # Compute entropy
+                entropy = self._decision_entropy(prediction)
+                entropies.append(entropy)
+
+        # Restore previous training state
+        if was_training:
+            self.model.train()
+
+        if len(entropies) == 0:
+            return 0.0
+
+        # Chunkability = mean(1 / exp(H_t))
+        effective_actions = [np.exp(h) for h in entropies]
+        chunkability_values = [1.0 / ea for ea in effective_actions]
+
+        return np.mean(chunkability_values)
+
+    def update_value_single(self, source_encoding, target_encoding, value_target):
+        """
+        Perform a single value head update for one (state, goal, value_target) tuple.
+
+        Args:
+            source_encoding: np.array - one-hot encoding of current state
+            target_encoding: np.array - one-hot encoding of goal state
+            value_target: float or np.array - scalar value target
+        """
+        source_tensor = torch.tensor([source_encoding], dtype=torch.float32).to(self.device)
+        target_tensor = torch.tensor([target_encoding], dtype=torch.float32).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+
+        # Ensure value_target is a tensor
+        if isinstance(value_target, (int, float)):
+            value_target_tensor = torch.tensor([[value_target]], dtype=torch.float32).to(self.device)
+        else:
+            value_target_tensor = torch.tensor([value_target], dtype=torch.float32).to(self.device)
+            if len(value_target_tensor.shape) == 1:
+                value_target_tensor = value_target_tensor.unsqueeze(1)
+
+        # Ensure model is in training mode
+        self.model.train()
+
+        if self.use_predictive_coding:
+            def loss_fn(output, target):
+                return torch.mean((output - target)**2)
+
+            self.pc_trainer.train_on_batch(
+                inputs=combined_tensor,
+                loss_fn=loss_fn,
+                loss_fn_kwargs={'target': value_target_tensor},
+                is_log_progress=False,
+                is_return_results_every_t=False,
+            )
+        else:
+            self.optimizer.zero_grad()
+            value = self.model(combined_tensor, return_value=True)
+            loss = torch.mean((value - value_target_tensor)**2)
+            loss.backward()
+            self.optimizer.step()
+
+    def update_value_batch(self, source_encodings, target_encodings, value_targets):
+        """
+        Perform a batch value head update for multiple (state, goal, value_target) tuples.
+
+        Args:
+            source_encodings: np.array - shape (batch_size, num_literals)
+            target_encodings: np.array - shape (batch_size, num_literals)
+            value_targets: np.array - shape (batch_size,) or (batch_size, 1)
+        """
+        source_tensor = torch.tensor(source_encodings, dtype=torch.float32).to(self.device)
+        target_tensor = torch.tensor(target_encodings, dtype=torch.float32).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+        value_target_tensor = torch.tensor(value_targets, dtype=torch.float32).to(self.device)
+
+        # Ensure value_target_tensor is 2D (batch_size, 1)
+        if len(value_target_tensor.shape) == 1:
+            value_target_tensor = value_target_tensor.unsqueeze(1)
+
+        # Ensure model is in training mode
+        self.model.train()
+
+        if self.use_predictive_coding:
+            def loss_fn(output, target):
+                return torch.mean((output - target)**2)
+
+            self.pc_trainer.train_on_batch(
+                inputs=combined_tensor,
+                loss_fn=loss_fn,
+                loss_fn_kwargs={'target': value_target_tensor},
+                is_log_progress=False,
+                is_return_results_every_t=False,
+            )
+        else:
+            self.optimizer.zero_grad()
+            value = self.model(combined_tensor, return_value=True)
+            loss = torch.mean((value - value_target_tensor)**2)
+            loss.backward()
+            self.optimizer.step()
+
+    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5):
+        """
+        Perform one combined training step that trains both policy and value heads.
+
+        Args:
+            path: list[int] - trajectory of literals from source to target
+            target_literal: int - goal literal
+            rewards: np.array or None - reward at each step (default: sparse terminal [0,0,...,1])
+            gamma: float - discount factor for TD(λ)
+            lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
+
+        Returns:
+            dict - diagnostics containing:
+                - chunkability: float
+                - lambda_: float
+                - value_targets: np.array
+                - value_estimates: np.array
+                - policy_loss: float (optional)
+                - value_loss: float (optional)
+        """
+        if len(path) <= 1:
+            return {
+                'chunkability': 0.0,
+                'lambda_': 0.0,
+                'value_targets': np.array([]),
+                'value_estimates': np.array([])
+            }
+
+        # Default sparse terminal rewards
+        if rewards is None:
+            rewards = np.zeros(len(path))
+            rewards[-1] = 1.0
+
+        # 1. Train policy head with teacher-forced one-hot targets
+        trajectory_sources, trajectory_targets, trajectory_answers = \
+            self._get_trajectory_subset(path, target_literal)
+
+        if len(trajectory_sources) > 0:
+            self.update_batch(trajectory_sources, trajectory_targets, trajectory_answers)
+
+        # 2. Compute current value estimates
+        value_estimates = self.compute_trajectory_values(path, target_literal)
+
+        # 3. Compute chunkability
+        chunkability = self.chunkability_from_trajectory(path, target_literal)
+
+        # 4. Derive lambda from chunkability
+        lambda_ = chunkability ** lambda_exponent
+
+        # 5. Compute TD(λ) value targets
+        value_targets = lambda_values(rewards, value_estimates, gamma, lambda_)
+
+        # 6. Train value head with TD(λ) targets
+        # Prepare encodings for all states in path
+        value_source_encodings = []
+        value_target_encodings = []
+
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        for literal in path:
+            source_idx = self.literal_to_idx(literal)
+            source_encoding = np.zeros(self.num_literals)
+            source_encoding[source_idx] = 1.0
+
+            value_source_encodings.append(source_encoding)
+            value_target_encodings.append(target_encoding)
+
+        self.update_value_batch(
+            np.array(value_source_encodings),
+            np.array(value_target_encodings),
+            value_targets
+        )
+
+        # 7. Return diagnostics
+        diagnostics = {
+            'chunkability': chunkability,
+            'lambda_': lambda_,
+            'value_targets': value_targets,
+            'value_estimates': value_estimates
+        }
+
+        return diagnostics

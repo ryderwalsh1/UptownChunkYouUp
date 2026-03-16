@@ -1,6 +1,7 @@
 import numpy as np
 import psyneulink as pnl
 import gen_impgraph
+from lambda_labels import lambda_values
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='psyneulink')
 
@@ -57,6 +58,13 @@ class PolicyNetwork():
             function=pnl.SoftMax(gain=10.0)
         )
 
+        # Value output head (scalar value estimate)
+        self.policy_value_output = pnl.ProcessingMechanism(
+            name=f'{policy_name}_Value_Output',
+            input_shapes=1,
+            function=pnl.Linear()
+        )
+
         # source input to hidden
         if source_to_hidden_matrix is not None:
             self.source_to_hidden = pnl.MappingProjection(
@@ -85,6 +93,17 @@ class PolicyNetwork():
                 matrix=(0.2*np.random.rand(hidden_size, self.num_literals) - 0.1)
             )
 
+        # hidden to value output (scalar)
+        hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
+        if hidden_to_value_matrix is not None:
+            self.hidden_to_value = pnl.MappingProjection(
+                matrix=hidden_to_value_matrix
+            )
+        else:
+            self.hidden_to_value = pnl.MappingProjection(
+                matrix=(0.02*np.random.rand(hidden_size, 1) - 0.01)
+            )
+
         # Create the policy network composition with symmetric learning pathways
         policy_comp = pnl.Composition(name=policy_name)
 
@@ -95,6 +114,15 @@ class PolicyNetwork():
             [self.policy_target_input, self.target_to_hidden, self.policy_hidden, self.hidden_to_output, self.policy_output]
         )
 
+        # Add value head processing pathways (shares hidden layer with policy head)
+        policy_comp.add_linear_processing_pathway(
+            [self.policy_source_input, self.source_to_hidden, self.policy_hidden, self.hidden_to_value, self.policy_value_output]
+        )
+        policy_comp.add_linear_processing_pathway(
+            [self.policy_target_input, self.target_to_hidden, self.policy_hidden, self.hidden_to_value, self.policy_value_output]
+        )
+
+        # Policy head learning pathways
         policy_comp.add_backpropagation_learning_pathway(
             pathway=[self.policy_source_input, self.policy_hidden, self.policy_output],
             learning_rate=learning_rate
@@ -104,9 +132,34 @@ class PolicyNetwork():
             learning_rate=learning_rate
         )
 
-        self.target_node = policy_comp.nodes[f'TARGET for {policy_name}_Output']
+        # Value head learning pathways
+        policy_comp.add_backpropagation_learning_pathway(
+            pathway=[self.policy_source_input, self.policy_hidden, self.policy_value_output],
+            learning_rate=learning_rate
+        )
+        policy_comp.add_backpropagation_learning_pathway(
+            pathway=[self.policy_target_input, self.policy_hidden, self.policy_value_output],
+            learning_rate=learning_rate
+        )
 
         self.policy = policy_comp
+
+        # Get target nodes using PsyNeuLink's learning pathway structure
+        # The target nodes are created automatically by add_backpropagation_learning_pathway
+        try:
+            # Try the dictionary access first (works in some PsyNeuLink versions)
+            self.target_node = policy_comp.nodes[f'TARGET for {policy_name}_Output']
+            self.value_target_node = policy_comp.nodes[f'TARGET for {policy_name}_Value_Output']
+        except (TypeError, KeyError):
+            # Fall back to searching through nodes
+            self.target_node = None
+            self.value_target_node = None
+            for node in policy_comp.nodes:
+                if hasattr(node, 'name'):
+                    if f'TARGET for {policy_name}_Output' in node.name:
+                        self.target_node = node
+                    elif f'TARGET for {policy_name}_Value_Output' in node.name:
+                        self.value_target_node = node
 
         training_sources = []
         training_targets = []
@@ -640,3 +693,253 @@ class PolicyNetwork():
         mse = np.mean(squared_errors)
 
         return mse
+
+    # ========================================================================
+    # Value Head Methods
+    # ========================================================================
+
+    def compute_value(self, source_literal, target_literal):
+        """
+        Compute value estimate for a single (state, goal) pair.
+
+        Args:
+            source_literal: int - current state literal
+            target_literal: int - goal literal
+
+        Returns:
+            float - scalar value estimate
+        """
+        # Create one-hot encodings
+        source_idx = self.literal_to_idx(source_literal)
+        source_encoding = np.zeros(self.num_literals)
+        source_encoding[source_idx] = 1.0
+
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        # Run forward pass through value head only
+        result = self.policy.run(
+            inputs={
+                self.policy_source_input: source_encoding,
+                self.policy_target_input: target_encoding
+            }
+        )
+
+        # Extract value from the value output node
+        value_output = self.policy_value_output.parameters.value.get(self.policy)
+        return float(value_output[0])
+
+    def compute_trajectory_values(self, path, target_literal):
+        """
+        Compute value estimates for all states in a trajectory.
+
+        Args:
+            path: list[int] - trajectory of literals
+            target_literal: int - goal literal
+
+        Returns:
+            np.array - value estimates for each state in path, shape (len(path),)
+        """
+        values = np.zeros(len(path))
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        for i, literal in enumerate(path):
+            source_idx = self.literal_to_idx(literal)
+            source_encoding = np.zeros(self.num_literals)
+            source_encoding[source_idx] = 1.0
+
+            # Run forward pass
+            self.policy.run(
+                inputs={
+                    self.policy_source_input: source_encoding,
+                    self.policy_target_input: target_encoding
+                }
+            )
+
+            # Extract value
+            value_output = self.policy_value_output.parameters.value.get(self.policy)
+            values[i] = float(value_output[0])
+
+        return values
+
+    def chunkability_from_trajectory(self, path, target_literal):
+        """
+        Compute chunkability (corridor-likeness) of a trajectory.
+
+        Uses the policy head's entropy to measure how deterministic the policy is.
+        Chunkability = mean(1 / exp(H_t)) across trajectory steps.
+
+        Args:
+            path: list[int] - trajectory of literals
+            target_literal: int - goal literal
+
+        Returns:
+            float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
+        """
+        if len(path) <= 1:
+            return 0.0
+
+        entropies = []
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        # Compute entropy at each step (excluding the final state)
+        for i in range(len(path) - 1):
+            source_idx = self.literal_to_idx(path[i])
+            source_encoding = np.zeros(self.num_literals)
+            source_encoding[source_idx] = 1.0
+
+            # Get policy prediction
+            self.policy.run(
+                inputs={
+                    self.policy_source_input: source_encoding,
+                    self.policy_target_input: target_encoding
+                }
+            )
+
+            # Extract policy output (not value output)
+            policy_output = self.policy_output.parameters.value.get(self.policy)
+
+            # Compute entropy
+            entropy = self._decision_entropy(policy_output.flatten())
+            entropies.append(entropy)
+
+        if len(entropies) == 0:
+            return 0.0
+
+        # Chunkability = mean(1 / exp(H_t))
+        effective_actions = [np.exp(h) for h in entropies]
+        chunkability_values = [1.0 / ea for ea in effective_actions]
+
+        return np.mean(chunkability_values)
+
+    def update_value_single(self, source_encoding, target_encoding, value_target):
+        """
+        Perform a single value head update for one (state, goal, value_target) tuple.
+
+        Args:
+            source_encoding: np.array - one-hot encoding of current state
+            target_encoding: np.array - one-hot encoding of goal state
+            value_target: float or np.array - scalar value target
+        """
+        # Ensure value_target is in array form
+        if isinstance(value_target, (int, float)):
+            value_target = np.array([value_target])
+
+        self.policy.learn(
+            inputs={
+                self.policy_source_input: [source_encoding],
+                self.policy_target_input: [target_encoding],
+                self.value_target_node: [value_target]
+            }
+        )
+
+    def update_value_batch(self, source_encodings, target_encodings, value_targets):
+        """
+        Perform a batch value head update for multiple (state, goal, value_target) tuples.
+
+        Args:
+            source_encodings: np.array - shape (batch_size, num_literals)
+            target_encodings: np.array - shape (batch_size, num_literals)
+            value_targets: np.array - shape (batch_size,) or (batch_size, 1)
+        """
+        # Ensure value_targets is 2D
+        if len(value_targets.shape) == 1:
+            value_targets = value_targets.reshape(-1, 1)
+
+        self.policy.learn(
+            inputs={
+                self.policy_source_input: source_encodings,
+                self.policy_target_input: target_encodings,
+                self.value_target_node: value_targets
+            }
+        )
+
+    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5):
+        """
+        Perform one combined training step that trains both policy and value heads.
+
+        Args:
+            path: list[int] - trajectory of literals from source to target
+            target_literal: int - goal literal
+            rewards: np.array or None - reward at each step (default: sparse terminal [0,0,...,1])
+            gamma: float - discount factor for TD(λ)
+            lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
+
+        Returns:
+            dict - diagnostics containing:
+                - chunkability: float
+                - lambda_: float
+                - value_targets: np.array
+                - value_estimates: np.array
+                - policy_loss: float (optional)
+                - value_loss: float (optional)
+        """
+        if len(path) <= 1:
+            return {
+                'chunkability': 0.0,
+                'lambda_': 0.0,
+                'value_targets': np.array([]),
+                'value_estimates': np.array([])
+            }
+
+        # Default sparse terminal rewards
+        if rewards is None:
+            rewards = np.zeros(len(path))
+            rewards[-1] = 1.0
+
+        # 1. Train policy head with teacher-forced one-hot targets
+        trajectory_sources, trajectory_targets, trajectory_answers = \
+            self._get_trajectory_subset(path, target_literal)
+
+        if len(trajectory_sources) > 0:
+            self.update_batch(trajectory_sources, trajectory_targets, trajectory_answers)
+
+        # 2. Compute current value estimates
+        value_estimates = self.compute_trajectory_values(path, target_literal)
+
+        # 3. Compute chunkability
+        chunkability = self.chunkability_from_trajectory(path, target_literal)
+
+        # 4. Derive lambda from chunkability
+        lambda_ = chunkability ** lambda_exponent
+
+        # 5. Compute TD(λ) value targets
+        value_targets = lambda_values(rewards, value_estimates, gamma, lambda_)
+
+        # 6. Train value head with TD(λ) targets
+        # Prepare encodings for all states in path
+        value_source_encodings = []
+        value_target_encodings = []
+
+        target_idx = self.literal_to_idx(target_literal)
+        target_encoding = np.zeros(self.num_literals)
+        target_encoding[target_idx] = 1.0
+
+        for literal in path:
+            source_idx = self.literal_to_idx(literal)
+            source_encoding = np.zeros(self.num_literals)
+            source_encoding[source_idx] = 1.0
+
+            value_source_encodings.append(source_encoding)
+            value_target_encodings.append(target_encoding)
+
+        self.update_value_batch(
+            np.array(value_source_encodings),
+            np.array(value_target_encodings),
+            value_targets
+        )
+
+        # 7. Return diagnostics
+        diagnostics = {
+            'chunkability': chunkability,
+            'lambda_': lambda_,
+            'value_targets': value_targets,
+            'value_estimates': value_estimates
+        }
+
+        return diagnostics
