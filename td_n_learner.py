@@ -932,7 +932,7 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
                 trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
 
         # Train both policy and value heads using combined learning
-        train_combined(policy_net, trajectory, target_literal, num_vars, gamma=gamma, lambda_exponent=lambda_exponent)
+        diagnostics = train_combined(policy_net, trajectory, target_literal, num_vars, gamma=gamma, lambda_exponent=lambda_exponent)
 
         # Capture metrics and log at intervals
         if (episode + 1) % capture_interval == 0:
@@ -1021,6 +1021,19 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
                       f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
+
+                # Print value head outputs for the most recent training trajectory
+                print(f"  Value Head Outputs (trajectory: {' -> '.join(str(s) for s in trajectory)}, goal: {target_literal}):")
+                value_estimates = diagnostics.get('value_estimates', np.array([]))
+                value_targets = diagnostics.get('value_targets', np.array([]))
+                lambda_ = diagnostics.get('lambda_', 0.0)
+                chunkability_diag = diagnostics.get('chunkability', 0.0)
+                print(f"    λ={lambda_:.4f} (chunkability={chunkability_diag:.4f})")
+                for step_i, literal in enumerate(trajectory):
+                    v_est = value_estimates[step_i] if step_i < len(value_estimates) else float('nan')
+                    v_tgt = value_targets[step_i] if step_i < len(value_targets) else float('nan')
+                    at_goal = " (GOAL)" if literal == target_literal else ""
+                    print(f"    state={literal:>3}{at_goal}  V(s)={v_est:>8.4f}  TD(λ) target={v_tgt:>8.4f}")
 
     # Capture final weight matrices
     if isinstance(policy_net, PolicyNetworkPC):
