@@ -16,7 +16,7 @@ from predictive_coding import pc_trainer
 
 class PolicyNetworkPC():
     def __init__(self, num_vars, num_clauses=None, graph=None, policy_name='Policy',
-                 hidden_size=20, learning_rate=0.5, T=256, use_predictive_coding=True, **kwargs):
+                 hidden_size=20, learning_rate=0.5, T=256, use_predictive_coding=False, **kwargs):
         """
         Policy network using Prospective Configuration via Predictive Coding.
 
