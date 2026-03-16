@@ -1461,6 +1461,7 @@ if __name__ == "__main__":
             fixed_source=15,
             fixed_target=14,
             entropy_threshold=0.5,
+            superlinearity=2.5,
             verbose=True
         )
 
