@@ -65,14 +65,15 @@ class PolicyNetworkPC():
         source_to_hidden_matrix = kwargs.get("source_to_hidden_matrix", None)
         target_to_hidden_matrix = kwargs.get("target_to_hidden_matrix", None)
         hidden_to_output_matrix = kwargs.get("hidden_to_output_matrix", None)
+        hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
 
         # Build the network using PyTorch
-        self._build_network(source_to_hidden_matrix, target_to_hidden_matrix, hidden_to_output_matrix)
+        self._build_network(source_to_hidden_matrix, target_to_hidden_matrix, hidden_to_output_matrix, hidden_to_value_matrix)
 
         # Prepare training data
         self._prepare_training_data()
 
-    def _build_network(self, source_to_hidden_matrix=None, target_to_hidden_matrix=None, hidden_to_output_matrix=None):
+    def _build_network(self, source_to_hidden_matrix=None, target_to_hidden_matrix=None, hidden_to_output_matrix=None, hidden_to_value_matrix=None):
         """Build the policy network with predictive coding layers and dual input pathways."""
 
         # Initialize weights for source pathway
@@ -115,7 +116,6 @@ class PolicyNetworkPC():
             self.pc_layer2 = pc.PCLayer()
 
             # Value output pathway (shares hidden layer)
-            hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
             if hidden_to_value_matrix is not None:
                 w_value = torch.tensor(hidden_to_value_matrix, dtype=torch.float32)
             else:
@@ -196,7 +196,6 @@ class PolicyNetworkPC():
             self.output_linear.weight.data = w_out.T
 
             # Value output pathway (shares hidden layer)
-            hidden_to_value_matrix = kwargs.get("hidden_to_value_matrix", None)
             if hidden_to_value_matrix is not None:
                 w_value = torch.tensor(hidden_to_value_matrix, dtype=torch.float32)
             else:

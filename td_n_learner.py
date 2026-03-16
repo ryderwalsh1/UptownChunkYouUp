@@ -6,7 +6,6 @@ import gen_impgraph
 import networkx as nx
 from policy_network import PolicyNetwork
 from policy_network_pc import PolicyNetworkPC
-from value_network import ValueNetwork
 import matplotlib.pyplot as plt
 import csv
 import os
@@ -317,16 +316,16 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=None, fixed_source
     return np.mean(losses)
 
 
-def test_loss_value(value_net, graph, num_vars, num_samples=50):
+def test_loss_value(policy_net, graph, num_vars, num_samples=50):
     """
-    Evaluate value network using Bellman error on optimal trajectories.
+    Evaluate value head using Bellman error on optimal trajectories.
 
     Samples random (source, target) pairs, generates optimal trajectories,
     and computes mean squared Bellman error: (V(s) - (r + V(s')))^2
     where r = 1.0 if s' is goal (and V(s') = 0), else r = 0.0.
 
     Args:
-        value_net: ValueNetwork - trained value network
+        policy_net: PolicyNetwork - policy network with value head
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
         num_samples: int - number of (source, target) pairs to sample
@@ -352,21 +351,12 @@ def test_loss_value(value_net, graph, num_vars, num_samples=50):
         if trajectory is None or len(trajectory) <= 1:
             continue
 
-        target_idx = literal_to_token_idx(target_literal, num_vars)
-        target_encoding = np.zeros(2 * num_vars)
-        target_encoding[target_idx] = 1.0
-
         # Evaluate value at each step in the trajectory
         for t in range(len(trajectory)):
             current_literal = trajectory[t]
 
-            # Create source encoding
-            current_idx = literal_to_token_idx(current_literal, num_vars)
-            source_encoding = np.zeros(2 * num_vars)
-            source_encoding[current_idx] = 1.0
-
-            # Get value prediction for current state
-            v_current = value_net.predict(source_encoding, target_encoding)
+            # Get value prediction for current state using the value head
+            v_current = policy_net.compute_value(current_literal, target_literal)
 
             # Compute Bellman target
             if current_literal == target_literal:
@@ -375,15 +365,12 @@ def test_loss_value(value_net, graph, num_vars, num_samples=50):
             else:
                 # Not at goal: reward = 0.0, bootstrap with V(s')
                 next_literal = trajectory[t + 1] if t + 1 < len(trajectory) else current_literal
-                next_idx = literal_to_token_idx(next_literal, num_vars)
-                next_encoding = np.zeros(2 * num_vars)
-                next_encoding[next_idx] = 1.0
 
                 # If next state is goal, V(s') = 0
                 if next_literal == target_literal:
                     bellman_target = 1.0  # reward for reaching goal
                 else:
-                    v_next = value_net.predict(next_encoding, target_encoding)
+                    v_next = policy_net.compute_value(next_literal, target_literal)
                     bellman_target = 0.0 + v_next
 
             # Compute Bellman error
@@ -597,137 +584,45 @@ def train_policy(policy_net, trajectory, target_literal, num_vars):
 
 
 # ============================================================================
-# TD(n) Training Functions
+# Combined Training Function (using value head in policy network)
 # ============================================================================
 
-def train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps, num_vars):
+def train_combined(policy_net, trajectory, target_literal, num_vars, gamma=0.99, lambda_exponent=2.5):
     """
-    Train policy network on a trajectory using online TD(n) updates.
-    Updates are applied at every step during the episode.
+    Train both policy and value heads on a trajectory using the combined learning approach.
+
+    This uses the policy network's learn_combined_step() method which:
+    - Trains the policy head with teacher-forced one-hot targets
+    - Computes chunkability from policy entropy
+    - Derives λ from chunkability (λ = chunkability^lambda_exponent)
+    - Computes TD(λ) value targets
+    - Trains the value head with those targets
 
     Args:
-        policy_net: PolicyNetwork - policy network to train
+        policy_net: PolicyNetwork - policy network with both policy and value heads
         trajectory: list[int] - sequence of literals from source to target
         target_literal: int - goal literal
-        n_steps: int - number of steps for TD(n)
-        num_vars: int - number of variables
+        num_vars: int - number of variables (unused, kept for compatibility)
+        gamma: float - discount factor for TD(λ)
+        lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
+
+    Returns:
+        dict - diagnostics from learn_combined_step (chunkability, lambda_, value_targets, value_estimates)
     """
-    vocab_size = 2 * num_vars
-    target_idx = literal_to_token_idx(target_literal, num_vars)
-    target_encoding = np.zeros(vocab_size)
-    target_encoding[target_idx] = 1.0
+    # Create sparse terminal rewards: [0, 0, ..., 0, 1]
+    rewards = np.zeros(len(trajectory))
+    rewards[-1] = 1.0
 
-    # Apply online updates at every step
-    for t in range(len(trajectory)):
-        # Compute n-step return
-        # G_t = r_t + r_{t+1} + ... + r_{t+n-1} + V(s_{t+n})
+    # Call the combined learning step
+    diagnostics = policy_net.learn_combined_step(
+        path=trajectory,
+        target_literal=target_literal,
+        rewards=rewards,
+        gamma=gamma,
+        lambda_exponent=lambda_exponent
+    )
 
-        n_step_return = 0.0
-        episode_end = len(trajectory) - 1
-
-        # Sum rewards for next n steps (or until episode ends)
-        for i in range(n_steps):
-            step_idx = t + i
-            if step_idx > episode_end:
-                break
-
-            # Reward: 1.0 if this step reaches the goal, 0.0 otherwise
-            if trajectory[step_idx] == target_literal:
-                n_step_return += 1.0
-                break  # Episode ends at goal
-
-        # Bootstrap with policy network if episode continues beyond t+n
-        bootstrap_idx = t + n_steps
-        if bootstrap_idx <= episode_end and trajectory[bootstrap_idx - 1] != target_literal:
-            # Get state at t+n
-            state_literal = trajectory[bootstrap_idx]
-            state_idx = literal_to_token_idx(state_literal, num_vars)
-            state_encoding = np.zeros(vocab_size)
-            state_encoding[state_idx] = 1.0
-
-            # Get value prediction for bootstrapping
-            bootstrap_value = value_net.predict(state_encoding, target_encoding)
-            n_step_return += bootstrap_value    
-        
-        # print(f"Step {t} | n-step return: {n_step_return:.4f} | Next literal: {trajectory[t+1] if t < episode_end else 'N/A'}")
-
-        # Create target distribution: put all mass at next literal in trajectory
-        policy_target = np.zeros(vocab_size)
-        if t < episode_end:
-            next_literal = trajectory[t + 1]
-            next_idx = literal_to_token_idx(next_literal, num_vars)
-            policy_target[next_idx] = 1.0
-        else:
-            # At goal, target is goal itself
-            policy_target[target_idx] = 1.0
-
-        # Current state encoding
-        current_literal = trajectory[t]
-        current_idx = literal_to_token_idx(current_literal, num_vars)
-        source_encoding = np.zeros(vocab_size)
-        source_encoding[current_idx] = 1.0
-
-        # Apply update
-        policy_net.update_single(source_encoding, target_encoding, policy_target)
-
-
-def train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars):
-    """
-    Train value network on a trajectory using online TD(n) updates.
-    Updates are applied at every step during the episode.
-
-    Args:
-        value_net: ValueNetwork - value network to train
-        trajectory: list[int] - sequence of literals from source to target
-        target_literal: int - goal literal
-        n_steps: int - number of steps for TD(n)
-        num_vars: int - number of variables
-    """
-    vocab_size = 2 * num_vars
-    target_idx = literal_to_token_idx(target_literal, num_vars)
-    target_encoding = np.zeros(vocab_size)
-    target_encoding[target_idx] = 1.0
-
-    # Apply online updates at every step
-    for t in range(len(trajectory)):
-        # Compute n-step return
-        # G_t = r_t + r_{t+1} + ... + r_{t+n-1} + V(s_{t+n})
-
-        n_step_return = 0.0
-        episode_end = len(trajectory) - 1
-
-        # Sum rewards for next n steps (or until episode ends)
-        for i in range(n_steps):
-            step_idx = t + i
-            if step_idx > episode_end:
-                break
-
-            # Reward: 1.0 if this step reaches the goal, 0.0 otherwise
-            if trajectory[step_idx] == target_literal:
-                n_step_return += 1.0
-                break  # Episode ends at goal
-
-        # Bootstrap with value network if episode continues beyond t+n
-        bootstrap_idx = t + n_steps
-        if bootstrap_idx <= episode_end and trajectory[bootstrap_idx - 1] != target_literal:
-            # Get state at t+n
-            state_literal = trajectory[bootstrap_idx]
-            state_idx = literal_to_token_idx(state_literal, num_vars)
-            state_encoding = np.zeros(vocab_size)
-            state_encoding[state_idx] = 1.0
-
-            # Get value estimate for bootstrapping
-            bootstrap_value = value_net.predict(state_encoding, target_encoding)
-            n_step_return += bootstrap_value
-
-        # Current state encoding
-        current_literal = trajectory[t]
-        current_idx = literal_to_token_idx(current_literal, num_vars)
-        source_encoding = np.zeros(vocab_size)
-        source_encoding[current_idx] = 1.0
-
-        # Apply update with scalar n-step return
-        value_net.update_single(source_encoding, target_encoding, n_step_return)
+    return diagnostics
 
 
 # ============================================================================
@@ -940,20 +835,19 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 # Main Training Loop
 # ============================================================================
 
-def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_steps=3,
-               max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
+def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
+               gamma=0.99, max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
                training_mode='random_sampling', fixed_source=None, fixed_target=None,
-               entropy_threshold=1.5, oracle_sensitivity=5.0, superlinearity=2.0):
+               entropy_threshold=1.5, oracle_sensitivity=5.0, lambda_exponent=2.5):
     """
-    Train policy and value networks using online TD(n).
+    Train policy network with dual heads (policy + value) using TD(λ) with chunkability-modulated λ.
 
     Args:
-        policy_net: PolicyNetwork - policy network to train
-        value_net: ValueNetwork - value network to train
+        policy_net: PolicyNetwork - policy network with both policy and value heads
         graph: nx.DiGraph - implication graph
         num_vars: int - number of variables
         num_episodes: int - number of training episodes
-        n_steps: int - number of steps for TD(n) (1 = TD(0), higher = more Monte Carlo)
+        gamma: float - discount factor for TD(λ)
         max_steps: int - maximum trajectory length to consider (skip if longer)
         capture_interval: int - how often to capture weights, evaluate policy, and log progress
         eval_episodes: int - number of episodes to run for policy evaluation
@@ -963,7 +857,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
         entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
         oracle_sensitivity: float - controls steepness of sigmoid transition (default 5.0)
-        superlinearity: float - exponent for lambda statistic computation (default 2.0)
+        lambda_exponent: float - exponent for lambda modulation (λ = chunkability^lambda_exponent, default 2.5)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, etc.)
@@ -1023,9 +917,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 source_literal, target_literal = random.choice(valid_pairs)
                 trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
 
-        # Train both networks on trajectory
-        train_policy_td_n(policy_net, value_net, trajectory, target_literal, n_steps, num_vars)
-        train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars)
+        # Train both policy and value heads using combined learning
+        train_combined(policy_net, trajectory, target_literal, num_vars, gamma=gamma, lambda_exponent=lambda_exponent)
 
         # Capture metrics and log at intervals
         if (episode + 1) % capture_interval == 0:
@@ -1085,7 +978,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             policy_oracle_call_probs.append(policy_avg_oracle_call_prob)
 
             # Compute lambda statistic: lambda = chunkability^superlinearity
-            policy_lambda = policy_avg_chunkability ** superlinearity
+            policy_lambda = policy_avg_chunkability ** lambda_exponent
             policy_lambdas.append(policy_lambda)
 
             # Capture network losses (use fixed pair if specified)
@@ -1096,7 +989,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 policy_loss = test_loss_policy(policy_net, graph, num_vars)
             policy_losses.append(policy_loss)
 
-            value_loss = test_loss_value(value_net, graph, num_vars)
+            value_loss = test_loss_value(policy_net, graph, num_vars)
             value_losses.append(value_loss)
 
             # Log progress
@@ -1116,24 +1009,31 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         source_to_hidden = policy_net.source_linear.weight.data.T.cpu().numpy()
         target_to_hidden = policy_net.target_linear.weight.data.T.cpu().numpy()
         hidden_to_output = policy_net.output_linear.weight.data.T.cpu().numpy()
+        hidden_to_value = policy_net.value_linear.weight.data.T.cpu().numpy() if hasattr(policy_net, 'value_linear') else None
 
         final_policy_matrices = {
             'source_to_hidden': source_to_hidden.copy(),
             'target_to_hidden': target_to_hidden.copy(),
             'hidden_to_output': hidden_to_output.copy()
         }
+
+        if hidden_to_value is not None:
+            final_policy_matrices['hidden_to_value'] = hidden_to_value.copy()
     else:
         # For PolicyNetwork, extract from PsyNeuLink
         final_policy_matrices = {
             'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
             'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
-            'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
+            'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy(),
+            'hidden_to_value': policy_net.hidden_to_value.matrix.base.copy()
         }
 
+    # Note: value head shares the same input-to-hidden weights, only has separate hidden-to-value weights
+    # We keep final_value_matrices for backwards compatibility but it's now part of policy_net
     final_value_matrices = {
-        'source_to_hidden': value_net.source_to_hidden.matrix.base.copy(),
-        'target_to_hidden': value_net.target_to_hidden.matrix.base.copy(),
-        'hidden_to_output': value_net.hidden_to_output.matrix.base.copy()
+        'source_to_hidden': final_policy_matrices['source_to_hidden'],
+        'target_to_hidden': final_policy_matrices['target_to_hidden'],
+        'hidden_to_output': final_policy_matrices['hidden_to_value']
     }
 
     # Compute final statistics
@@ -1150,7 +1050,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         'final_policy_matrices': final_policy_matrices,
         'final_value_matrices': final_value_matrices,
         'entropy_threshold': entropy_threshold,
-        'superlinearity': superlinearity
+        'superlinearity': lambda_exponent  # Renamed for clarity: lambda = chunkability^lambda_exponent
     }
 
     return stats
@@ -1231,7 +1131,7 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
             for episode, loss in zip(stats['captured_episodes'], stats['value_losses']):
                 writer.writerow([episode, loss])
 
-    # Save final policy weight matrices (no target_to_hidden for fixed-goal policy)
+    # Save final policy weight matrices
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_source_to_hidden.npy',
             stats['final_policy_matrices']['source_to_hidden'])
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_target_to_hidden.npy',
@@ -1239,7 +1139,12 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
     np.save(f'{save_dir}/final_weights/{experiment_name}/policy_hidden_to_output.npy',
             stats['final_policy_matrices']['hidden_to_output'])
 
-    # Save final value weight matrices (only if present, i.e., TD(n) mode)
+    # Save value head weights (hidden_to_value projection)
+    if 'hidden_to_value' in stats['final_policy_matrices']:
+        np.save(f'{save_dir}/final_weights/{experiment_name}/policy_hidden_to_value.npy',
+                stats['final_policy_matrices']['hidden_to_value'])
+
+    # Save final value weight matrices for backwards compatibility (only if present, i.e., TD(λ) mode)
     if 'final_value_matrices' in stats:
         np.save(f'{save_dir}/final_weights/{experiment_name}/value_source_to_hidden.npy',
                 stats['final_value_matrices']['source_to_hidden'])
@@ -1387,7 +1292,7 @@ if __name__ == "__main__":
     # ========================================================================
 
     # Choose training mode: 'teacher_forcing' or 'td_n'
-    training_mode = 'teacher_forcing'
+    training_mode = 'td_n'
 
     # Implication graph parameters
     num_vars = 16
@@ -1395,7 +1300,7 @@ if __name__ == "__main__":
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
-    graph_path = f'results/graphs/impgraph_{num_vars}v_{num_clauses}c_{training_mode}/graph.pkl'
+    graph_path = f'results/graphs/impgraph_{num_vars}v_{num_clauses}c_teacher_forcing/graph.pkl'
     graph = load_graph(graph_path)
     print(f"Loaded graph from {graph_path}")
 
@@ -1480,14 +1385,17 @@ if __name__ == "__main__":
         plot_training_curves(stats, experiment_name)
 
     # ========================================================================
-    # TD(n) Mode
+    # TD(λ) Mode (with chunkability-modulated λ)
     # ========================================================================
     elif training_mode == 'td_n':
-        # TD(n) hyperparameters
-        n_steps = 1  # Number of steps for TD(n): 1=TD(0), higher=more Monte Carlo
+        # TD(λ) hyperparameters
+        gamma = 0.99  # Discount factor
+        lambda_exponent = 2.5  # Lambda modulation: λ = chunkability^lambda_exponent
+        oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
+        entropy_threshold = 0.75  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
         # Create experiment name
-        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_n{n_steps}'
+        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
 
         # Save graph for reference
         # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
@@ -1497,39 +1405,30 @@ if __name__ == "__main__":
         # gen_impgraph.visualize_graph(graph)
         # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
-        # Option: Load pre-trained weights (e.g., from mlp_basic_learner.py)
+        # Option: Load pre-trained weights (e.g., from teacher forcing or previous runs)
         # Uncomment to load weights:
-        # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy', epoch=450)
-        # value_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-        # value_weights = load_weight_matrices(value_weights_dir, network_type='value')
+        # policy_weights_dir = 'results/td_n/final_weights/impgraph_16v_25c_teacher_forcing'
+        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy')
+        # hidden_to_value_path = os.path.join(policy_weights_dir, 'policy_hidden_to_value.npy')
+        # hidden_to_value_matrix = np.load(hidden_to_value_path) if os.path.exists(hidden_to_value_path) else None
         policy_weights = None  # Set to None for fresh start
-        value_weights = None  # Set to None if not loading pretrained weights
+        hidden_to_value_matrix = None
 
-        # Create networks with optional pretrained weights
-        policy_net = PolicyNetwork(
+        # Create policy network with both policy and value heads
+        policy_net = PolicyNetworkPC(
             num_vars=num_vars,
             graph=graph,
-            policy_name='TDN_Policy',
+            policy_name='TDLambda_Policy',
             hidden_size=hidden_size,
             learning_rate=policy_learning_rate,
             source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
             target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
-            hidden_to_output_matrix=policy_weights[2] if policy_weights else None
+            hidden_to_output_matrix=policy_weights[2] if policy_weights else None,
+            hidden_to_value_matrix=hidden_to_value_matrix
         )
 
-        value_net = ValueNetwork(
-            num_vars=num_vars,
-            graph=graph,
-            value_name='TDN_Value',
-            hidden_size=hidden_size,
-            learning_rate=value_learning_rate,
-            source_to_hidden_matrix=value_weights[0] if value_weights else None,
-            target_to_hidden_matrix=value_weights[1] if value_weights else None,
-            hidden_to_output_matrix=value_weights[2] if value_weights else None
-        )
-
-        print(f"Training TD(n) with n={n_steps}")
+        print(f"Training TD(λ) with chunkability-modulated λ")
+        print(f"  gamma={gamma}, lambda_exponent={lambda_exponent}")
         print(f"Graph: {num_vars} vars, {num_clauses} clauses")
         print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
         print()
@@ -1537,17 +1436,19 @@ if __name__ == "__main__":
         # Train
         stats = train_td_n(
             policy_net=policy_net,
-            value_net=value_net,
             graph=graph,
             num_vars=num_vars,
             num_episodes=num_episodes,
-            n_steps=n_steps,
+            gamma=gamma,
+            lambda_exponent=lambda_exponent,
             max_steps=50,
             capture_interval=10,
             verbose=True,
             training_mode='fixed_pair',
-            fixed_source=-2,  # uncomment for fixed_pair mode
-            fixed_target=4    # uncomment for fixed_pair mode
+            fixed_source=15,
+            fixed_target=14,
+            entropy_threshold=entropy_threshold,
+            oracle_sensitivity=oracle_sensitivity
         )
 
         print("\n" + "="*60)
