@@ -400,6 +400,33 @@ def test_loss_value(value_net, graph, num_vars, num_samples=50):
 # Policy Evaluation
 # ============================================================================
 
+def compute_trajectory_chunkability(entropies):
+    """
+    Compute the chunkability (corridor-likeness) of a trajectory.
+
+    At each step, computes exp(H_t) which represents the effective number of actions
+    the policy is considering. The chunkability is the average of 1/exp(H_t) across steps:
+    - 1.0 for perfectly deterministic policy (one action considered)
+    - Approaches 0 for diffuse/uniform policy (many actions considered)
+
+    Args:
+        entropies: list[float] - entropy values at each step of the trajectory
+
+    Returns:
+        float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
+    """
+    if len(entropies) == 0:
+        return 0.0
+
+    # Compute effective number of actions at each step: exp(H_t)
+    effective_actions = [np.exp(h) for h in entropies]
+
+    # Chunkability is average of 1 / effective_actions
+    chunkability_values = [1.0 / ea for ea in effective_actions]
+
+    return np.mean(chunkability_values)
+
+
 def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, transition_sharpness=5.0):
     """
     Execute one episode from source to target using the policy network with entropy-based mixing.
@@ -416,10 +443,11 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         transition_sharpness: float - controls steepness of sigmoid transition (higher = sharper)
 
     Returns:
-        tuple: (trajectory, reached_goal, avg_entropy)
+        tuple: (trajectory, reached_goal, avg_entropy, chunkability)
             trajectory: list[int] - sequence of literals visited
             reached_goal: bool - whether target was reached
             avg_entropy: float - average entropy of policy decisions across the episode
+            chunkability: float - corridor-likeness metric (1.0 = deterministic, 0.0 = diffuse)
     """
     current_literal = source_literal
     trajectory = [source_literal]
@@ -431,7 +459,8 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         # Check if we've reached the goal
         if current_literal == target_literal:
             avg_entropy = np.mean(entropies) if len(entropies) > 0 else 0.0
-            return trajectory, True, avg_entropy
+            chunkability = compute_trajectory_chunkability(entropies)
+            return trajectory, True, avg_entropy, chunkability
 
         # Get valid next nodes (adjacent in graph)
         adjacent_literals = get_adjacent_nodes(current_literal, graph)
@@ -501,8 +530,9 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 
     # Max steps reached without reaching goal
     avg_entropy = np.mean(entropies) if len(entropies) > 0 else 0.0
+    chunkability = compute_trajectory_chunkability(entropies)
 
-    return trajectory, False, avg_entropy
+    return trajectory, False, avg_entropy, chunkability
 
 
 # ============================================================================
@@ -756,6 +786,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     policy_success_rates = []
     policy_avg_lengths = []
     policy_avg_entropies = []
+    policy_chunkabilities = []
     captured_episodes = []
     policy_losses = []
 
@@ -785,11 +816,12 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
             eval_successes = 0
             eval_lengths = []
             eval_entropies = []
+            eval_chunkabilities = []
 
             if training_mode == 'fixed_pair':
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
-                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
                         entropy_threshold, transition_sharpness
                     )
@@ -800,11 +832,12 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
                     eval_entropies.append(eval_entropy)
+                    eval_chunkabilities.append(eval_chunkability)
             else:
                 # Evaluate on random episodes
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
-                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps,
                         entropy_threshold, transition_sharpness
                     )
@@ -813,6 +846,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
                     eval_entropies.append(eval_entropy)
+                    eval_chunkabilities.append(eval_chunkability)
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -823,6 +857,9 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 
             policy_avg_entropy = np.mean(eval_entropies)
             policy_avg_entropies.append(policy_avg_entropy)
+
+            policy_avg_chunkability = np.mean(eval_chunkabilities)
+            policy_chunkabilities.append(policy_avg_chunkability)
 
             # Capture network loss (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -838,28 +875,26 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
+                      f"Chunkability: {policy_avg_chunkability:.4f} | "
                       f"Policy Loss: {policy_loss:.4f}")
 
-    # Capture final weight matrices (no target_to_hidden for fixed-goal policy)
+    # Capture final weight matrices
     if isinstance(policy_net, PolicyNetworkPC):
-        # For PolicyNetworkPC, extract from PyTorch model
-        if policy_net.use_predictive_coding:
-            # Model structure: Linear -> PCLayer -> Sigmoid -> Linear -> PCLayer
-            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output = policy_net.model[3].weight.data.T.cpu().numpy()
-        else:
-            # Model structure: Linear -> Sigmoid -> Linear
-            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output = policy_net.model[2].weight.data.T.cpu().numpy()
+        # For PolicyNetworkPC, extract from PyTorch model attributes
+        source_to_hidden = policy_net.source_linear.weight.data.T.cpu().numpy()
+        target_to_hidden = policy_net.target_linear.weight.data.T.cpu().numpy()
+        hidden_to_output = policy_net.output_linear.weight.data.T.cpu().numpy()
 
         final_policy_matrices = {
             'source_to_hidden': source_to_hidden.copy(),
+            'target_to_hidden': target_to_hidden.copy(),
             'hidden_to_output': hidden_to_output.copy()
         }
     else:
         # For PolicyNetwork, extract from PsyNeuLink
         final_policy_matrices = {
             'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+            'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
             'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
         }
 
@@ -868,6 +903,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         'policy_success_rates': policy_success_rates,
         'policy_avg_lengths': policy_avg_lengths,
         'policy_avg_entropies': policy_avg_entropies,
+        'policy_chunkabilities': policy_chunkabilities,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'final_policy_matrices': final_policy_matrices,
@@ -941,6 +977,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
     policy_success_rates = []
     policy_avg_lengths = []
     policy_avg_entropies = []
+    policy_chunkabilities = []
     captured_episodes = []
     policy_losses = []
     value_losses = []
@@ -972,11 +1009,12 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             eval_successes = 0
             eval_lengths = []
             eval_entropies = []
+            eval_chunkabilities = []
 
             if training_mode == 'fixed_pair':
                 # Evaluate only on the fixed pair
                 for _ in range(eval_episodes):
-                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
                         entropy_threshold, transition_sharpness
                     )
@@ -985,11 +1023,12 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
                     eval_entropies.append(eval_entropy)
+                    eval_chunkabilities.append(eval_chunkability)
             else:
                 # Evaluate on random episodes
                 for _ in range(eval_episodes):
                     eval_source, eval_target = random.choice(valid_pairs)
-                    eval_trajectory, eval_reached_goal, eval_entropy = run_episode(
+                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps,
                         entropy_threshold, transition_sharpness
                     )
@@ -998,6 +1037,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                         eval_successes += 1
                     eval_lengths.append(len(eval_trajectory))
                     eval_entropies.append(eval_entropy)
+                    eval_chunkabilities.append(eval_chunkability)
 
             # Record policy evaluation metrics
             policy_success_rate = eval_successes / eval_episodes
@@ -1008,6 +1048,9 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
 
             policy_avg_entropy = np.mean(eval_entropies)
             policy_avg_entropies.append(policy_avg_entropy)
+
+            policy_avg_chunkability = np.mean(eval_chunkabilities)
+            policy_chunkabilities.append(policy_avg_chunkability)
 
             # Capture network losses (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -1026,29 +1069,27 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
+                      f"Chunkability: {policy_avg_chunkability:.4f} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
-    # Capture final weight matrices (no target_to_hidden for fixed-goal policy)
+    # Capture final weight matrices
     if isinstance(policy_net, PolicyNetworkPC):
-        # For PolicyNetworkPC, extract from PyTorch model
-        if policy_net.use_predictive_coding:
-            # Model structure: Linear -> PCLayer -> Sigmoid -> Linear -> PCLayer
-            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output = policy_net.model[3].weight.data.T.cpu().numpy()
-        else:
-            # Model structure: Linear -> Sigmoid -> Linear
-            source_to_hidden = policy_net.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output = policy_net.model[2].weight.data.T.cpu().numpy()
+        # For PolicyNetworkPC, extract from PyTorch model attributes
+        source_to_hidden = policy_net.source_linear.weight.data.T.cpu().numpy()
+        target_to_hidden = policy_net.target_linear.weight.data.T.cpu().numpy()
+        hidden_to_output = policy_net.output_linear.weight.data.T.cpu().numpy()
 
         final_policy_matrices = {
             'source_to_hidden': source_to_hidden.copy(),
+            'target_to_hidden': target_to_hidden.copy(),
             'hidden_to_output': hidden_to_output.copy()
         }
     else:
         # For PolicyNetwork, extract from PsyNeuLink
         final_policy_matrices = {
             'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
+            'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
             'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
         }
 
@@ -1063,6 +1104,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         'policy_success_rates': policy_success_rates,
         'policy_avg_lengths': policy_avg_lengths,
         'policy_avg_entropies': policy_avg_entropies,
+        'policy_chunkabilities': policy_chunkabilities,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
@@ -1113,6 +1155,13 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         for episode, entropy in zip(stats['captured_episodes'], stats['policy_avg_entropies']):
             writer.writerow([episode, entropy])
 
+    # Save policy chunkabilities
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_chunkabilities.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'policy_chunkability'])
+        for episode, chunkability in zip(stats['captured_episodes'], stats['policy_chunkabilities']):
+            writer.writerow([episode, chunkability])
+
     # Save policy losses
     with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
         writer = csv.writer(f)
@@ -1152,7 +1201,7 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
 
 def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=False):
     """
-    Plot and save training curves (policy success rate, policy episode length, losses).
+    Plot and save training curves (policy success rate, policy episode length, losses, chunkability).
 
     Args:
         stats: dict - statistics returned from train_td_n or train_teacher_forcing
@@ -1166,20 +1215,23 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     if has_value_loss:
         fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     else:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
 
-    # Policy success rate
+    # Assign axes based on layout
     if has_value_loss:
         ax_success = axes[0, 0]
         ax_length = axes[0, 1]
         ax_entropy = axes[0, 2]
         ax_policy_loss = axes[1, 0]
-        ax_value_loss = axes[1, 1]
+        ax_chunkability = axes[1, 1]
+        ax_value_loss = axes[1, 2]
     else:
         ax_success = axes[0, 0]
         ax_length = axes[0, 1]
-        ax_entropy = axes[1, 0]
-        ax_policy_loss = axes[1, 1]
+        ax_entropy = axes[0, 2]
+        ax_policy_loss = axes[1, 0]
+        ax_chunkability = axes[1, 1]
+        # Leave axes[1, 2] empty for teacher forcing mode
 
     # Policy success rate
     ax_success.plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
@@ -1216,6 +1268,14 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     ax_policy_loss.set_title('Policy Network Loss over Training')
     ax_policy_loss.grid(True, alpha=0.3)
 
+    # Chunkability
+    ax_chunkability.plot(stats['captured_episodes'], stats['policy_chunkabilities'], 'purple', linewidth=2)
+    ax_chunkability.set_xlabel('Training Episode')
+    ax_chunkability.set_ylabel('Chunkability (Corridor-likeness)')
+    ax_chunkability.set_title('Policy Chunkability over Training')
+    ax_chunkability.grid(True, alpha=0.3)
+    ax_chunkability.set_ylim([0, 1.05])
+
     # Value loss (only if present)
     if has_value_loss:
         ax_value_loss.plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
@@ -1223,6 +1283,9 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
         ax_value_loss.set_ylabel('Value Loss (MSE)')
         ax_value_loss.set_title('Value Network Loss over Training')
         ax_value_loss.grid(True, alpha=0.3)
+    else:
+        # Hide the unused subplot for teacher forcing mode
+        axes[1, 2].axis('off')
 
     plt.tight_layout()
 
@@ -1321,7 +1384,7 @@ if __name__ == "__main__":
             training_mode="fixed_pair",
             fixed_source=15,
             fixed_target=14,
-            entropy_threshold=None,
+            entropy_threshold=1.0,
             verbose=True
         )
 

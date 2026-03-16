@@ -15,14 +15,13 @@ from predictive_coding import pc_layer as pc
 from predictive_coding import pc_trainer
 
 class PolicyNetworkPC():
-    def __init__(self, num_vars, goal_node, num_clauses=None, graph=None, policy_name='Policy',
-                 hidden_size=20, learning_rate=0.5, T=256, use_predictive_coding=False, **kwargs):
+    def __init__(self, num_vars, num_clauses=None, graph=None, policy_name='Policy',
+                 hidden_size=20, learning_rate=0.5, T=256, use_predictive_coding=True, **kwargs):
         """
         Policy network using Prospective Configuration via Predictive Coding.
 
         Args:
             num_vars: Number of variables in the implication graph
-            goal_node: The fixed goal node
             num_clauses: Number of clauses (if generating new graph)
             graph: Pre-existing implication graph
             policy_name: Name for the policy network
@@ -30,7 +29,7 @@ class PolicyNetworkPC():
             learning_rate: Learning rate for parameter updates
             T: Number of inference iterations for PC (typically 256 for PC, 1 for backprop)
             use_predictive_coding: If True, use PC algorithm; if False, use standard backprop
-            **kwargs: Additional arguments (e.g., source_to_hidden_matrix, hidden_to_output_matrix)
+            **kwargs: Additional arguments (e.g., source_to_hidden_matrix, target_to_hidden_matrix, hidden_to_output_matrix)
         """
         # Generate structure from implication graph
         if graph is None:
@@ -41,13 +40,10 @@ class PolicyNetworkPC():
             self.graph = graph
 
         self.num_vars = num_vars
-        self.goal_node = goal_node
         self.policy_name = policy_name
 
-        # Compute next steps for fixed goal
-        all_next_steps = gen_impgraph.compute_next_steps(self.graph, num_vars)
-        # Filter to only include steps toward the fixed goal
-        self.next_steps = {source: next_lit for (source, target), next_lit in all_next_steps.items() if target == goal_node}
+        # Compute next steps for all source-target pairs
+        self.next_steps = gen_impgraph.compute_next_steps(self.graph, num_vars)
 
         self.memories, self.memory_array, self.literal_to_idx = gen_impgraph.implications_to_memories(self.graph, num_vars)
 
@@ -66,48 +62,88 @@ class PolicyNetworkPC():
 
         # Optional matrix specifications
         source_to_hidden_matrix = kwargs.get("source_to_hidden_matrix", None)
+        target_to_hidden_matrix = kwargs.get("target_to_hidden_matrix", None)
         hidden_to_output_matrix = kwargs.get("hidden_to_output_matrix", None)
 
         # Build the network using PyTorch
-        self._build_network(source_to_hidden_matrix, hidden_to_output_matrix)
+        self._build_network(source_to_hidden_matrix, target_to_hidden_matrix, hidden_to_output_matrix)
 
         # Prepare training data
         self._prepare_training_data()
 
-    def _build_network(self, source_to_hidden_matrix=None, hidden_to_output_matrix=None):
-        """Build the policy network with predictive coding layers."""
+    def _build_network(self, source_to_hidden_matrix=None, target_to_hidden_matrix=None, hidden_to_output_matrix=None):
+        """Build the policy network with predictive coding layers and dual input pathways."""
 
-        # Initialize weights
+        # Initialize weights for source pathway
         if source_to_hidden_matrix is not None:
-            w1 = torch.tensor(source_to_hidden_matrix, dtype=torch.float32)
+            w_source = torch.tensor(source_to_hidden_matrix, dtype=torch.float32)
         else:
-            w1 = torch.tensor(0.2 * np.random.rand(self.num_literals, self.hidden_size) - 0.1, dtype=torch.float32)
+            w_source = torch.tensor(0.2 * np.random.rand(self.num_literals, self.hidden_size) - 0.1, dtype=torch.float32)
 
+        # Initialize weights for target pathway
+        if target_to_hidden_matrix is not None:
+            w_target = torch.tensor(target_to_hidden_matrix, dtype=torch.float32)
+        else:
+            w_target = torch.tensor(0.2 * np.random.rand(self.num_literals, self.hidden_size) - 0.1, dtype=torch.float32)
+
+        # Initialize weights for hidden to output
         if hidden_to_output_matrix is not None:
-            w2 = torch.tensor(hidden_to_output_matrix, dtype=torch.float32)
+            w_out = torch.tensor(hidden_to_output_matrix, dtype=torch.float32)
         else:
-            w2 = torch.tensor(0.2 * np.random.rand(self.hidden_size, self.num_literals) - 0.1, dtype=torch.float32)
+            w_out = torch.tensor(0.2 * np.random.rand(self.hidden_size, self.num_literals) - 0.1, dtype=torch.float32)
 
-        # Build network architecture
+        # Build network architecture with dual inputs
         if self.use_predictive_coding:
-            # PC network: Linear -> PCLayer -> Activation -> Linear -> PCLayer -> SoftMax
-            linear1 = nn.Linear(self.num_literals, self.hidden_size, bias=False)
-            linear1.weight.data = w1.T  # PyTorch uses transposed weights
+            # PC network with dual input pathways
+            # Source pathway
+            self.source_linear = nn.Linear(self.num_literals, self.hidden_size, bias=False)
+            self.source_linear.weight.data = w_source.T
 
-            pc_layer1 = pc.PCLayer()
+            # Target pathway
+            self.target_linear = nn.Linear(self.num_literals, self.hidden_size, bias=False)
+            self.target_linear.weight.data = w_target.T
 
-            linear2 = nn.Linear(self.hidden_size, self.num_literals, bias=False)
-            linear2.weight.data = w2.T
+            # Shared hidden layer components
+            self.pc_layer1 = pc.PCLayer()
+            self.activation = nn.Sigmoid()
 
-            pc_layer2 = pc.PCLayer()
+            # Output pathway
+            self.output_linear = nn.Linear(self.hidden_size, self.num_literals, bias=False)
+            self.output_linear.weight.data = w_out.T
 
-            self.model = nn.Sequential(
-                linear1,
-                pc_layer1,
-                nn.Sigmoid(),  # Using Sigmoid like PsyNeuLink's Logistic
-                linear2,
-                pc_layer2,
-            )
+            self.pc_layer2 = pc.PCLayer()
+
+            # Create a custom forward function that handles dual inputs
+            class DualInputPCModel(nn.Module):
+                def __init__(self, source_linear, target_linear, pc_layer1, activation, output_linear, pc_layer2):
+                    super().__init__()
+                    self.source_linear = source_linear
+                    self.target_linear = target_linear
+                    self.pc_layer1 = pc_layer1
+                    self.activation = activation
+                    self.output_linear = output_linear
+                    self.pc_layer2 = pc_layer2
+
+                def forward(self, x):
+                    # x is expected to be concatenated [source, target]
+                    # Split the input
+                    source_input = x[:, :self.source_linear.in_features]
+                    target_input = x[:, self.source_linear.in_features:]
+
+                    # Process both pathways and combine
+                    source_hidden = self.source_linear(source_input)
+                    target_hidden = self.target_linear(target_input)
+                    combined_hidden = source_hidden + target_hidden
+
+                    # Continue through the network
+                    hidden = self.pc_layer1(combined_hidden)
+                    hidden = self.activation(hidden)
+                    output = self.output_linear(hidden)
+                    output = self.pc_layer2(output)
+                    return output
+
+            self.model = DualInputPCModel(self.source_linear, self.target_linear, self.pc_layer1,
+                                          self.activation, self.output_linear, self.pc_layer2)
 
             # Create PC trainer
             self.pc_trainer = pc_trainer.PCTrainer(
@@ -118,41 +154,62 @@ class PolicyNetworkPC():
                 optimizer_p_kwargs={'lr': self.learning_rate},
                 T=self.T,
                 update_x_at='all',
-                update_p_at='last',  # Update parameters only at the end of inference
-                plot_progress_at=[],  # Disable plotting to avoid interactive prompts
+                update_p_at='last',
+                plot_progress_at=[],
             )
         else:
-            # Standard backprop network (T=1)
-            linear1 = nn.Linear(self.num_literals, self.hidden_size, bias=False)
-            linear1.weight.data = w1.T
+            # Standard backprop network with dual inputs
+            self.source_linear = nn.Linear(self.num_literals, self.hidden_size, bias=False)
+            self.source_linear.weight.data = w_source.T
 
-            linear2 = nn.Linear(self.hidden_size, self.num_literals, bias=False)
-            linear2.weight.data = w2.T
+            self.target_linear = nn.Linear(self.num_literals, self.hidden_size, bias=False)
+            self.target_linear.weight.data = w_target.T
 
-            self.model = nn.Sequential(
-                linear1,
-                nn.Sigmoid(),
-                linear2,
-            )
+            self.activation = nn.Sigmoid()
+
+            self.output_linear = nn.Linear(self.hidden_size, self.num_literals, bias=False)
+            self.output_linear.weight.data = w_out.T
+
+            class DualInputModel(nn.Module):
+                def __init__(self, source_linear, target_linear, activation, output_linear):
+                    super().__init__()
+                    self.source_linear = source_linear
+                    self.target_linear = target_linear
+                    self.activation = activation
+                    self.output_linear = output_linear
+
+                def forward(self, x):
+                    # x is expected to be concatenated [source, target]
+                    source_input = x[:, :self.source_linear.in_features]
+                    target_input = x[:, self.source_linear.in_features:]
+
+                    source_hidden = self.source_linear(source_input)
+                    target_hidden = self.target_linear(target_input)
+                    combined_hidden = source_hidden + target_hidden
+
+                    hidden = self.activation(combined_hidden)
+                    output = self.output_linear(hidden)
+                    return output
+
+            self.model = DualInputModel(self.source_linear, self.target_linear, self.activation, self.output_linear)
 
             self.optimizer = optim.SGD(self.model.parameters(), lr=self.learning_rate)
 
         self.model.to(self.device)
 
     def _prepare_training_data(self):
-        """Prepare training data filtered for the fixed goal."""
+        """Prepare training data for all source-target pairs."""
         training_sources = []
+        training_targets = []
         expected_answers = []
 
-        # Filter training data to only include examples for the fixed goal
-        goal_idx = self.literal_to_idx(self.goal_node)
         for memory in self.memories:
-            # Check if this memory's target matches our goal
-            if np.argmax(memory['Target']) == goal_idx:
-                training_sources.append(memory['Source'])
-                expected_answers.append(memory['Answer'])
+            training_sources.append(memory['Source'])
+            training_targets.append(memory['Target'])
+            expected_answers.append(memory['Answer'])
 
         self.training_sources = torch.tensor(np.array(training_sources), dtype=torch.float32).to(self.device)
+        self.training_targets = torch.tensor(np.array(training_targets), dtype=torch.float32).to(self.device)
         self.expected_answers = torch.tensor(np.array(expected_answers), dtype=torch.float32).to(self.device)
 
     def test_accuracy(self):
@@ -168,8 +225,9 @@ class PolicyNetworkPC():
         self.model.eval()
         with torch.no_grad():
             for i in range(num_examples):
-                source = self.training_sources[i:i+1]
-                output = self.model(source)
+                # Concatenate source and target inputs
+                source_target = torch.cat([self.training_sources[i:i+1], self.training_targets[i:i+1]], dim=1)
+                output = self.model(source_target)
                 # Apply softmax with gain like PsyNeuLink (for both PC and backprop)
                 output = torch.softmax(output * 10.0, dim=1)
 
@@ -197,8 +255,9 @@ class PolicyNetworkPC():
         self.model.eval()
         with torch.no_grad():
             for i in range(num_examples):
-                source = self.training_sources[i:i+1]
-                output = self.model(source)
+                # Concatenate source and target inputs
+                source_target = torch.cat([self.training_sources[i:i+1], self.training_targets[i:i+1]], dim=1)
+                output = self.model(source_target)
                 # Apply softmax (for both PC and backprop)
                 output = torch.softmax(output * 10.0, dim=1)
 
@@ -213,15 +272,13 @@ class PolicyNetworkPC():
 
     def _capture_learning_matrices(self, learning_matrices):
         """Capture the weight matrices for visualization."""
-        if self.use_predictive_coding:
-            # Extract weights from the Linear layers
-            source_to_hidden_matrix = self.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output_matrix = self.model[3].weight.data.T.cpu().numpy()
-        else:
-            source_to_hidden_matrix = self.model[0].weight.data.T.cpu().numpy()
-            hidden_to_output_matrix = self.model[2].weight.data.T.cpu().numpy()
+        # Extract weights from the Linear layers (same for both PC and backprop)
+        source_to_hidden_matrix = self.source_linear.weight.data.T.cpu().numpy()
+        target_to_hidden_matrix = self.target_linear.weight.data.T.cpu().numpy()
+        hidden_to_output_matrix = self.output_linear.weight.data.T.cpu().numpy()
 
         learning_matrices['source_to_hidden'].append(source_to_hidden_matrix.copy())
+        learning_matrices['target_to_hidden'].append(target_to_hidden_matrix.copy())
         learning_matrices['hidden_to_output'].append(hidden_to_output_matrix.copy())
 
         return learning_matrices
@@ -233,21 +290,29 @@ class PolicyNetworkPC():
         else:
             return -(idx - self.num_vars + 1)
 
-    def _get_next_literal(self, current_literal):
-        """Get the next literal to traverse in the implication chain toward the fixed goal."""
-        return self.next_steps.get(current_literal)
+    def _get_next_literal(self, current_literal, target_literal):
+        """Get the next literal to traverse in the implication chain toward target_literal."""
+        return self.next_steps.get((current_literal, target_literal))
 
-    def _get_trajectory_subset(self, visited_literals):
-        """Create training data subset for visited literals (with fixed goal)."""
+    def _get_trajectory_subset(self, visited_literals, target_literal):
+        """Create training data subset for visited literals and target."""
         trajectory_sources = []
+        trajectory_targets = []
         trajectory_answers = []
+
+        # Get target index
+        target_idx = self.literal_to_idx(target_literal)
 
         for source_lit in visited_literals:
             source_idx = self.literal_to_idx(source_lit)
             source_encoding = np.zeros(self.num_literals)
             source_encoding[source_idx] = 1
 
-            next_step = self.next_steps.get(source_lit)
+            target_encoding = np.zeros(self.num_literals)
+            target_encoding[target_idx] = 1
+
+            # Get expected next step
+            next_step = self.next_steps.get((source_lit, target_literal))
             if next_step is None:
                 continue
 
@@ -256,11 +321,12 @@ class PolicyNetworkPC():
             answer_encoding[answer_idx] = 1
 
             trajectory_sources.append(source_encoding)
+            trajectory_targets.append(target_encoding)
             trajectory_answers.append(answer_encoding)
 
-        return (np.array(trajectory_sources), np.array(trajectory_answers))
+        return (np.array(trajectory_sources), np.array(trajectory_targets), np.array(trajectory_answers))
 
-    def _test_trajectory_accuracy(self, trajectory_sources, trajectory_answers):
+    def _test_trajectory_accuracy(self, trajectory_sources, trajectory_targets, trajectory_answers):
         """Test accuracy on a specific trajectory subset."""
         correct = 0
         num_samples = len(trajectory_sources)
@@ -272,7 +338,10 @@ class PolicyNetworkPC():
         with torch.no_grad():
             for i in range(num_samples):
                 source = torch.tensor(trajectory_sources[i:i+1], dtype=torch.float32).to(self.device)
-                output = self.model(source)
+                target = torch.tensor(trajectory_targets[i:i+1], dtype=torch.float32).to(self.device)
+                # Concatenate source and target inputs
+                source_target = torch.cat([source, target], dim=1)
+                output = self.model(source_target)
                 # Apply softmax (for both PC and backprop)
                 output = torch.softmax(output * 10.0, dim=1)
 
@@ -288,14 +357,14 @@ class PolicyNetworkPC():
         return correct / num_samples if num_samples > 0 else 0.0
 
     def learn(self, epochs=150, capture_interval=150, on_policy=False, source_literal=None,
-              position_update='actual', max_steps=100):
+              target_literal=None, position_update='actual', max_steps=100):
         """Wrapper function for the two learning modes."""
         if not on_policy:
             ret = self._learn_off_policy(epochs=epochs, capture_interval=capture_interval)
         else:
-            if source_literal is None:
-                raise ValueError("Source literal must be provided for on-policy learning")
-            ret = self._learn_on_policy(source_literal, epochs=epochs, capture_interval=capture_interval,
+            if source_literal is None or target_literal is None:
+                raise ValueError("Source and target literals must be provided for on-policy learning")
+            ret = self._learn_on_policy(source_literal, target_literal, epochs=epochs, capture_interval=capture_interval,
                                   position_update=position_update, max_steps=max_steps)
         return ret
 
@@ -304,6 +373,7 @@ class PolicyNetworkPC():
         losses = []
         learning_matrices = {
             'source_to_hidden': [],
+            'target_to_hidden': [],
             'hidden_to_output': []
         }
 
@@ -317,6 +387,9 @@ class PolicyNetworkPC():
                 losses.append(loss)
                 learning_matrices = self._capture_learning_matrices(learning_matrices)
 
+            # Concatenate source and target for input
+            combined_inputs = torch.cat([self.training_sources, self.training_targets], dim=1)
+
             if self.use_predictive_coding:
                 # Use PC training
                 def loss_fn(output, target):
@@ -325,7 +398,7 @@ class PolicyNetworkPC():
                     return torch.mean((output_softmax - target)**2)
 
                 self.pc_trainer.train_on_batch(
-                    inputs=self.training_sources,
+                    inputs=combined_inputs,
                     loss_fn=loss_fn,
                     loss_fn_kwargs={'target': self.expected_answers},
                     is_log_progress=False,
@@ -334,7 +407,7 @@ class PolicyNetworkPC():
             else:
                 # Use standard backprop
                 self.optimizer.zero_grad()
-                output = self.model(self.training_sources)
+                output = self.model(combined_inputs)
                 output_softmax = torch.softmax(output * 10.0, dim=1)
                 loss = torch.mean((output_softmax - self.expected_answers)**2)
                 loss.backward()
@@ -342,20 +415,22 @@ class PolicyNetworkPC():
 
         return losses, learning_matrices
 
-    def _learn_on_policy(self, source_literal, epochs=150, capture_interval=10,
+    def _learn_on_policy(self, source_literal, target_literal, epochs=150, capture_interval=10,
                         position_update='actual', max_steps=100):
-        """On-policy learning by traversing from source to goal repeatedly."""
+        """On-policy learning by traversing from source to target repeatedly."""
         if source_literal not in self.literals:
             raise ValueError(f"source_literal {source_literal} not in valid literals")
-        if self.goal_node not in self.literals:
-            raise ValueError(f"goal_node {self.goal_node} not in valid literals")
+        if target_literal not in self.literals:
+            raise ValueError(f"target_literal {target_literal} not in valid literals")
         if position_update not in ['predicted', 'actual']:
             raise ValueError("position_update must be 'predicted' or 'actual'")
 
         source_idx = self.literal_to_idx(source_literal)
+        target_idx = self.literal_to_idx(target_literal)
         accuracies = []
         learning_matrices = {
             'source_to_hidden': [],
+            'target_to_hidden': [],
             'hidden_to_output': []
         }
 
@@ -370,13 +445,19 @@ class PolicyNetworkPC():
                 current_idx = self.literal_to_idx(current_literal)
                 source_encoding = np.zeros(self.num_literals)
                 source_encoding[current_idx] = 1
+
+                target_encoding = np.zeros(self.num_literals)
+                target_encoding[target_idx] = 1
+
                 source_tensor = torch.tensor([source_encoding], dtype=torch.float32).to(self.device)
+                target_tensor = torch.tensor([target_encoding], dtype=torch.float32).to(self.device)
+                combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
 
                 # Get policy network prediction (temporarily switch to eval mode)
                 was_training = self.model.training
                 self.model.eval()
                 with torch.no_grad():
-                    prediction = self.model(source_tensor)
+                    prediction = self.model(combined_tensor)
                     # Apply softmax (for both PC and backprop)
                     prediction = torch.softmax(prediction * 10.0, dim=1)
                     predicted_literal_idx = torch.argmax(prediction).item()
@@ -385,8 +466,8 @@ class PolicyNetworkPC():
 
                 predicted_literal = self._idx_to_literal(predicted_literal_idx)
 
-                # Get correct next step toward goal
-                correct_next_literal = self.next_steps.get(current_literal)
+                # Get correct next step toward target
+                correct_next_literal = self.next_steps.get((current_literal, target_literal))
 
                 if correct_next_literal is None:
                     break
@@ -404,7 +485,7 @@ class PolicyNetworkPC():
                         return torch.mean((output_softmax - target)**2)
 
                     self.pc_trainer.train_on_batch(
-                        inputs=source_tensor,
+                        inputs=combined_tensor,
                         loss_fn=loss_fn,
                         loss_fn_kwargs={'target': answer_tensor},
                         is_log_progress=False,
@@ -412,7 +493,7 @@ class PolicyNetworkPC():
                     )
                 else:
                     self.optimizer.zero_grad()
-                    output = self.model(source_tensor)
+                    output = self.model(combined_tensor)
                     output_softmax = torch.softmax(output * 10.0, dim=1)
                     loss = torch.mean((output_softmax - answer_tensor)**2)
                     loss.backward()
@@ -426,7 +507,7 @@ class PolicyNetworkPC():
 
                 current_literal = next_literal
 
-                if current_literal == self.goal_node:
+                if current_literal == target_literal:
                     break
 
                 if current_literal not in visited_literals:
@@ -435,11 +516,11 @@ class PolicyNetworkPC():
                 step_count += 1
 
             if step_count >= max_steps:
-                print(f"Warning: Epoch {epoch} reached max_steps ({max_steps}) without reaching goal")
+                print(f"Warning: Epoch {epoch} reached max_steps ({max_steps}) without reaching target")
 
             if epoch % capture_interval == 0:
-                traj_sources, traj_answers = self._get_trajectory_subset(visited_literals)
-                accuracy = self._test_trajectory_accuracy(traj_sources, traj_answers)
+                traj_sources, traj_targets, traj_answers = self._get_trajectory_subset(visited_literals, target_literal)
+                accuracy = self._test_trajectory_accuracy(traj_sources, traj_targets, traj_answers)
                 accuracies.append(accuracy)
                 learning_matrices = self._capture_learning_matrices(learning_matrices)
                 print(f"Epoch {epoch}: Trajectory accuracy = {accuracy*100:.2f}% ({len(visited_literals)} literals)")
@@ -464,16 +545,20 @@ class PolicyNetworkPC():
         entropy = -np.sum(action_np[non_zero_mask] * np.log2(action_np[non_zero_mask]))
         return entropy
 
-    def traverse_path(self, source, tau, force_action=True, max_steps=100):
-        """Traverse an implication chain from source to goal, consulting oracle when uncertain."""
+    def traverse_path(self, source, target, tau, force_action=True, max_steps=100):
+        """Traverse an implication chain from source to target, consulting oracle when uncertain."""
         if source not in self.literals:
             raise ValueError(f"source {source} not in valid literals")
+        if target not in self.literals:
+            raise ValueError(f"target {target} not in valid literals")
 
         current_literal = source
         path = [source]
         oracle_calls = []
         accuracy = []
         step_count = 0
+
+        target_idx = self.literal_to_idx(target)
 
         # Store current training state
         was_training = self.model.training
@@ -484,17 +569,23 @@ class PolicyNetworkPC():
                 current_idx = self.literal_to_idx(current_literal)
                 source_encoding = np.zeros(self.num_literals)
                 source_encoding[current_idx] = 1
+
+                target_encoding = np.zeros(self.num_literals)
+                target_encoding[target_idx] = 1
+
                 source_tensor = torch.tensor([source_encoding], dtype=torch.float32).to(self.device)
+                target_tensor = torch.tensor([target_encoding], dtype=torch.float32).to(self.device)
+                combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
 
                 # Get policy network prediction
-                prediction = self.model(source_tensor)
+                prediction = self.model(combined_tensor)
                 # Apply softmax (for both PC and backprop)
                 prediction = torch.softmax(prediction * 10.0, dim=1)
 
                 predicted_literal_idx = torch.argmax(prediction).item()
                 predicted_literal = self._idx_to_literal(predicted_literal_idx)
 
-                correct_next_literal = self.next_steps.get(current_literal)
+                correct_next_literal = self.next_steps.get((current_literal, target))
 
                 if correct_next_literal is None:
                     break
@@ -517,7 +608,7 @@ class PolicyNetworkPC():
                 current_literal = next_literal
                 path.append(current_literal)
 
-                if current_literal == self.goal_node:
+                if current_literal == target:
                     break
 
                 step_count += 1
@@ -527,28 +618,35 @@ class PolicyNetworkPC():
             self.model.train()
 
         if step_count >= max_steps:
-            print(f"Warning: traverse_path reached max_steps ({max_steps}) without reaching goal")
+            print(f"Warning: traverse_path reached max_steps ({max_steps}) without reaching target")
 
         return path, oracle_calls, accuracy
 
-    def predict(self, source):
-        """Predict the next literal in the implication chain toward fixed goal."""
-        if isinstance(source, int):
+    def predict(self, source, target):
+        """Predict the next literal in the implication chain from source to target."""
+        if isinstance(source, int) and isinstance(target, int):
             source_array = np.zeros(self.num_literals)
             source_idx = self.literal_to_idx(source)
             source_array[source_idx] = 1
+
+            target_array = np.zeros(self.num_literals)
+            target_idx = self.literal_to_idx(target)
+            target_array[target_idx] = 1
         else:
             source_array = np.array(source)
+            target_array = np.array(target)
 
-        # Convert to tensor efficiently
+        # Convert to tensor efficiently and concatenate
         source_tensor = torch.from_numpy(np.array([source_array], dtype=np.float32)).to(self.device)
+        target_tensor = torch.from_numpy(np.array([target_array], dtype=np.float32)).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
 
         # Store current training state
         was_training = self.model.training
 
         self.model.eval()
         with torch.no_grad():
-            prediction = self.model(source_tensor)
+            prediction = self.model(combined_tensor)
             # Apply softmax to convert to probabilities (for both PC and backprop)
             prediction = torch.softmax(prediction * 10.0, dim=1)
 
@@ -558,10 +656,12 @@ class PolicyNetworkPC():
 
         return prediction.cpu().numpy()[0]
 
-    def update_single(self, source_encoding, policy_target):
-        """Perform a single learning update for one (state, target) tuple."""
+    def update_single(self, source_encoding, target_encoding, policy_target):
+        """Perform a single learning update for one (state, goal, target) tuple."""
         source_tensor = torch.tensor([source_encoding], dtype=torch.float32).to(self.device)
-        target_tensor = torch.tensor([policy_target], dtype=torch.float32).to(self.device)
+        target_tensor = torch.tensor([target_encoding], dtype=torch.float32).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+        policy_target_tensor = torch.tensor([policy_target], dtype=torch.float32).to(self.device)
 
         # Ensure model is in training mode
         self.model.train()
@@ -572,24 +672,26 @@ class PolicyNetworkPC():
                 return torch.mean((output_softmax - target)**2)
 
             self.pc_trainer.train_on_batch(
-                inputs=source_tensor,
+                inputs=combined_tensor,
                 loss_fn=loss_fn,
-                loss_fn_kwargs={'target': target_tensor},
+                loss_fn_kwargs={'target': policy_target_tensor},
                 is_log_progress=False,
                 is_return_results_every_t=False,
             )
         else:
             self.optimizer.zero_grad()
-            output = self.model(source_tensor)
+            output = self.model(combined_tensor)
             output_softmax = torch.softmax(output * 10.0, dim=1)
-            loss = torch.mean((output_softmax - target_tensor)**2)
+            loss = torch.mean((output_softmax - policy_target_tensor)**2)
             loss.backward()
             self.optimizer.step()
 
-    def update_batch(self, source_encodings, policy_targets):
-        """Perform a batch learning update for multiple (state, target) tuples."""
+    def update_batch(self, source_encodings, target_encodings, policy_targets):
+        """Perform a batch learning update for multiple (state, goal, target) tuples."""
         source_tensor = torch.tensor(source_encodings, dtype=torch.float32).to(self.device)
-        target_tensor = torch.tensor(policy_targets, dtype=torch.float32).to(self.device)
+        target_tensor = torch.tensor(target_encodings, dtype=torch.float32).to(self.device)
+        combined_tensor = torch.cat([source_tensor, target_tensor], dim=1)
+        policy_target_tensor = torch.tensor(policy_targets, dtype=torch.float32).to(self.device)
 
         # Ensure model is in training mode
         self.model.train()
@@ -600,16 +702,16 @@ class PolicyNetworkPC():
                 return torch.mean((output_softmax - target)**2)
 
             self.pc_trainer.train_on_batch(
-                inputs=source_tensor,
+                inputs=combined_tensor,
                 loss_fn=loss_fn,
-                loss_fn_kwargs={'target': target_tensor},
+                loss_fn_kwargs={'target': policy_target_tensor},
                 is_log_progress=False,
                 is_return_results_every_t=False,
             )
         else:
             self.optimizer.zero_grad()
-            output = self.model(source_tensor)
+            output = self.model(combined_tensor)
             output_softmax = torch.softmax(output * 10.0, dim=1)
-            loss = torch.mean((output_softmax - target_tensor)**2)
+            loss = torch.mean((output_softmax - policy_target_tensor)**2)
             loss.backward()
             self.optimizer.step()
