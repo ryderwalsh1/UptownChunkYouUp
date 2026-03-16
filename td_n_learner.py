@@ -427,7 +427,7 @@ def compute_trajectory_chunkability(entropies):
     return np.mean(chunkability_values)
 
 
-def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, transition_sharpness=5.0):
+def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, oracle_sensitivity=5.0):
     """
     Execute one episode from source to target using the policy network with entropy-based mixing.
 
@@ -440,7 +440,7 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         max_steps: int - maximum steps before termination
         entropy_threshold: float or None - center point for entropy-based mixing; if None, always samples
                                            from policy distribution without mixing
-        transition_sharpness: float - controls steepness of sigmoid transition (higher = sharper)
+        oracle_sensitivity: float - controls steepness of sigmoid transition (higher = sharper)
 
     Returns:
         tuple: (trajectory, reached_goal, avg_entropy, chunkability, confidence)
@@ -500,7 +500,7 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
             def sigmoid(x):
                 return 1.0 / (1.0 + np.exp(-x))
 
-            policy_weight = sigmoid(transition_sharpness * (entropy_threshold - entropy))
+            policy_weight = sigmoid(oracle_sensitivity * (entropy_threshold - entropy))
             policy_weights.append(policy_weight)
 
             # Get optimal action distribution (one-hot at optimal next literal)
@@ -737,7 +737,7 @@ def train_value_td_n(value_net, trajectory, target_literal, n_steps, num_vars):
 def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                           max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
                           training_mode='random_sampling', fixed_source=None, fixed_target=None,
-                          entropy_threshold=1.5, transition_sharpness=5.0):
+                          entropy_threshold=1.5, oracle_sensitivity=10.0, superlinearity=2.0):
     """
     Train policy network using episodic teacher forcing (no value network).
 
@@ -754,7 +754,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
         fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
         entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
-        transition_sharpness: float - controls steepness of sigmoid transition (default 5.0)
+        oracle_sensitivity: float - controls steepness of sigmoid transition (default 10.0)
+        superlinearity: float - exponent for lambda statistic computation (default 2.0)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, policy_loss)
@@ -793,7 +794,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     policy_avg_lengths = []
     policy_avg_entropies = []
     policy_chunkabilities = []
-    policy_confidences = []
+    policy_oracle_call_probs = []
+    policy_lambdas = []
     captured_episodes = []
     policy_losses = []
 
@@ -831,7 +833,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                 for _ in range(eval_episodes):
                     eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
-                        entropy_threshold, transition_sharpness
+                        entropy_threshold, oracle_sensitivity
                     )
 
                     # print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
@@ -848,7 +850,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                     eval_source, eval_target = random.choice(valid_pairs)
                     eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps,
-                        entropy_threshold, transition_sharpness
+                        entropy_threshold, oracle_sensitivity
                     )
 
                     if eval_reached_goal:
@@ -871,8 +873,12 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
             policy_avg_chunkability = np.mean(eval_chunkabilities)
             policy_chunkabilities.append(policy_avg_chunkability)
 
-            policy_avg_confidence = np.mean(eval_confidences)
-            policy_confidences.append(policy_avg_confidence)
+            policy_avg_oracle_call_prob = 1.0 - np.mean(eval_confidences)
+            policy_oracle_call_probs.append(policy_avg_oracle_call_prob)
+
+            # Compute lambda statistic: lambda = chunkability^superlinearity
+            policy_lambda = policy_avg_chunkability ** superlinearity
+            policy_lambdas.append(policy_lambda)
 
             # Capture network loss (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -889,7 +895,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Chunkability: {policy_avg_chunkability:.4f} | "
-                      f"Confidence: {policy_avg_confidence:.4f} | "
+                      f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
                       f"Policy Loss: {policy_loss:.4f}")
 
     # Capture final weight matrices
@@ -918,11 +924,13 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         'policy_avg_lengths': policy_avg_lengths,
         'policy_avg_entropies': policy_avg_entropies,
         'policy_chunkabilities': policy_chunkabilities,
-        'policy_confidences': policy_confidences,
+        'policy_oracle_call_probs': policy_oracle_call_probs,
+        'policy_lambdas': policy_lambdas,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'final_policy_matrices': final_policy_matrices,
-        'entropy_threshold': entropy_threshold
+        'entropy_threshold': entropy_threshold,
+        'superlinearity': superlinearity
     }
 
     return stats
@@ -935,7 +943,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_steps=3,
                max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
                training_mode='random_sampling', fixed_source=None, fixed_target=None,
-               entropy_threshold=1.5, transition_sharpness=5.0):
+               entropy_threshold=1.5, oracle_sensitivity=5.0, superlinearity=2.0):
     """
     Train policy and value networks using online TD(n).
 
@@ -954,7 +962,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
         fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
         entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
-        transition_sharpness: float - controls steepness of sigmoid transition (default 5.0)
+        oracle_sensitivity: float - controls steepness of sigmoid transition (default 5.0)
+        superlinearity: float - exponent for lambda statistic computation (default 2.0)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, etc.)
@@ -993,7 +1002,8 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
     policy_avg_lengths = []
     policy_avg_entropies = []
     policy_chunkabilities = []
-    policy_confidences = []
+    policy_oracle_call_probs = []
+    policy_lambdas = []
     captured_episodes = []
     policy_losses = []
     value_losses = []
@@ -1033,7 +1043,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                 for _ in range(eval_episodes):
                     eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
                         policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
-                        entropy_threshold, transition_sharpness
+                        entropy_threshold, oracle_sensitivity
                     )
 
                     if eval_reached_goal:
@@ -1048,7 +1058,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                     eval_source, eval_target = random.choice(valid_pairs)
                     eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
                         policy_net, eval_source, eval_target, graph, num_vars, max_steps,
-                        entropy_threshold, transition_sharpness
+                        entropy_threshold, oracle_sensitivity
                     )
 
                     if eval_reached_goal:
@@ -1071,8 +1081,12 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
             policy_avg_chunkability = np.mean(eval_chunkabilities)
             policy_chunkabilities.append(policy_avg_chunkability)
 
-            policy_avg_confidence = np.mean(eval_confidences)
-            policy_confidences.append(policy_avg_confidence)
+            policy_avg_oracle_call_prob = 1.0 - np.mean(eval_confidences)
+            policy_oracle_call_probs.append(policy_avg_oracle_call_prob)
+
+            # Compute lambda statistic: lambda = chunkability^superlinearity
+            policy_lambda = policy_avg_chunkability ** superlinearity
+            policy_lambdas.append(policy_lambda)
 
             # Capture network losses (use fixed pair if specified)
             if training_mode == 'fixed_pair':
@@ -1092,7 +1106,7 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Chunkability: {policy_avg_chunkability:.4f} | "
-                      f"Confidence: {policy_avg_confidence:.4f} | "
+                      f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
@@ -1128,13 +1142,15 @@ def train_td_n(policy_net, value_net, graph, num_vars, num_episodes=1000, n_step
         'policy_avg_lengths': policy_avg_lengths,
         'policy_avg_entropies': policy_avg_entropies,
         'policy_chunkabilities': policy_chunkabilities,
-        'policy_confidences': policy_confidences,
+        'policy_oracle_call_probs': policy_oracle_call_probs,
+        'policy_lambdas': policy_lambdas,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
         'final_policy_matrices': final_policy_matrices,
         'final_value_matrices': final_value_matrices,
-        'entropy_threshold': entropy_threshold
+        'entropy_threshold': entropy_threshold,
+        'superlinearity': superlinearity
     }
 
     return stats
@@ -1186,12 +1202,19 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         for episode, chunkability in zip(stats['captured_episodes'], stats['policy_chunkabilities']):
             writer.writerow([episode, chunkability])
 
-    # Save policy confidences
-    with open(f'{save_dir}/metrics/{experiment_name}_policy_confidences.csv', 'w', newline='') as f:
+    # Save policy oracle call probabilities
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_oracle_call_probs.csv', 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['episode', 'policy_confidence'])
-        for episode, confidence in zip(stats['captured_episodes'], stats['policy_confidences']):
-            writer.writerow([episode, confidence])
+        writer.writerow(['episode', 'policy_oracle_call_prob'])
+        for episode, oracle_call_prob in zip(stats['captured_episodes'], stats['policy_oracle_call_probs']):
+            writer.writerow([episode, oracle_call_prob])
+
+    # Save policy lambdas
+    with open(f'{save_dir}/metrics/{experiment_name}_policy_lambdas.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'policy_lambda'])
+        for episode, lambda_val in zip(stats['captured_episodes'], stats['policy_lambdas']):
+            writer.writerow([episode, lambda_val])
 
     # Save policy losses
     with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
@@ -1232,7 +1255,7 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
 
 def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=False):
     """
-    Plot and save training curves (policy success rate, policy episode length, losses, chunkability, confidence).
+    Plot and save training curves (policy success rate, policy episode length, losses, chunkability, oracle_call_prob).
 
     Args:
         stats: dict - statistics returned from train_td_n or train_teacher_forcing
@@ -1255,22 +1278,22 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
         ax_entropy = axes[0, 1]
         ax_policy_loss = axes[1, 1]
         ax_chunkability = axes[0, 2]
-        ax_confidence = axes[1, 2]
+        ax_oracle_call_prob = axes[1, 2]
         ax_value_loss = axes[2, 1]
-        # Hide unused subplots
+        ax_lambda = axes[2, 2]
+        # Hide unused subplot
         axes[2, 0].axis('off')
-        axes[2, 2].axis('off')
     else:
         ax_success = axes[0, 0]
         ax_length = axes[1, 0]
         ax_entropy = axes[0, 1]
         ax_policy_loss = axes[1, 1]
         ax_chunkability = axes[0, 2]
-        ax_confidence = axes[1, 2]
+        ax_oracle_call_prob = axes[1, 2]
+        ax_lambda = axes[2, 2]
         # Hide unused subplots for teacher forcing mode
         axes[2, 0].axis('off')
         axes[2, 1].axis('off')
-        axes[2, 2].axis('off')
 
     # Policy success rate
     ax_success.plot(stats['captured_episodes'], stats['policy_success_rates'], 'b-', linewidth=2)
@@ -1315,13 +1338,13 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     ax_chunkability.grid(True, alpha=0.3)
     ax_chunkability.set_ylim([0, 1.05])
 
-    # Confidence (average policy weight)
-    ax_confidence.plot(stats['captured_episodes'], stats['policy_confidences'], 'brown', linewidth=2)
-    ax_confidence.set_xlabel('Training Episode')
-    ax_confidence.set_ylabel('Confidence (Policy Weight)')
-    ax_confidence.set_title('Policy Confidence over Training')
-    ax_confidence.grid(True, alpha=0.3)
-    ax_confidence.set_ylim([0, 1.05])
+    # Oracle Call Probability (1 - policy weight)
+    ax_oracle_call_prob.plot(stats['captured_episodes'], stats['policy_oracle_call_probs'], 'brown', linewidth=2)
+    ax_oracle_call_prob.set_xlabel('Training Episode')
+    ax_oracle_call_prob.set_ylabel('Oracle Call Probability')
+    ax_oracle_call_prob.set_title('Oracle Call Probability over Training')
+    ax_oracle_call_prob.grid(True, alpha=0.3)
+    ax_oracle_call_prob.set_ylim([0, 1.05])
 
     # Value loss (only if present)
     if has_value_loss:
@@ -1330,6 +1353,15 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
         ax_value_loss.set_ylabel('Value Loss (MSE)')
         ax_value_loss.set_title('Value Network Loss over Training')
         ax_value_loss.grid(True, alpha=0.3)
+
+    # Lambda statistic (chunkability^superlinearity)
+    superlinearity = stats.get('superlinearity', 2.0)
+    ax_lambda.plot(stats['captured_episodes'], stats['policy_lambdas'], 'teal', linewidth=2)
+    ax_lambda.set_xlabel('Training Episode')
+    ax_lambda.set_ylabel(f'Lambda (Chunkability^{superlinearity:.1f})')
+    ax_lambda.set_title(f'Lambda Statistic over Training')
+    ax_lambda.grid(True, alpha=0.3)
+    ax_lambda.set_ylim([0, 1.05])
 
     plt.tight_layout()
 
