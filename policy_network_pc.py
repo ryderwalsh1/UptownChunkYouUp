@@ -588,6 +588,88 @@ class PolicyNetworkPC():
         entropy = -np.sum(action_np[non_zero_mask] * np.log2(action_np[non_zero_mask]))
         return entropy
 
+    def per_step_entropy(self, path, target_literal):
+        """
+        Compute the policy entropy at each decision point in a trajectory.
+
+        Args:
+            path: list[int] - full trajectory including terminal state
+                  (e.g., [15, -10, 3, 14])
+            target_literal: int - goal node
+
+        Returns:
+            dict with:
+              'entropies': list[float] - H(pi) at each non-terminal state
+              'states': list[int] - the states where decisions were made
+              'total_entropy': float - sum of per-step entropies (Hick's law proxy)
+        """
+        entropies = []
+        states = []
+
+        # Iterate through all non-terminal states (all except the last)
+        for i in range(len(path) - 1):
+            current_literal = path[i]
+            states.append(current_literal)
+
+            # Get policy prediction for this state
+            prediction = self.predict(current_literal, target_literal)
+
+            # Compute entropy
+            entropy = self._decision_entropy(prediction.flatten())
+            entropies.append(entropy)
+
+        # Compute total entropy (sum)
+        total_entropy = np.sum(entropies) if len(entropies) > 0 else 0.0
+
+        return {
+            'entropies': entropies,
+            'states': states,
+            'total_entropy': total_entropy
+        }
+
+    def chunking_index(self, path, target_literal):
+        """
+        Compute how much the trajectory behaves as a single chunk vs independent steps.
+
+        chunking_index = 1 - (H_intermediate / H_initiation)
+
+        where H_initiation is entropy at the first decision point and
+        H_intermediate is mean entropy at all subsequent decision points.
+
+        Args:
+            path: list[int] - full trajectory including terminal state
+            target_literal: int - goal node
+
+        Returns:
+            float or None:
+                - 0.0 = no chunking (uniform entropy)
+                - approaches 1.0 = full chunking (intermediate steps deterministic)
+                - can be negative if intermediate steps are MORE uncertain than initiation
+                - None if trajectory has fewer than 2 decision points or H_initiation is too small
+        """
+        # Get per-step entropies
+        per_step_data = self.per_step_entropy(path, target_literal)
+        entropies = per_step_data['entropies']
+
+        # Need at least 2 decision points to compute chunking index
+        if len(entropies) < 2:
+            return None
+
+        # Extract H_initiation (first decision point)
+        H_initiation = entropies[0]
+
+        # Handle edge case: if H_initiation is too small, index is undefined
+        if H_initiation < 1e-8:
+            return None
+
+        # Extract H_intermediate (mean of all subsequent decision points)
+        H_intermediate = np.mean(entropies[1:])
+
+        # Compute chunking index
+        chunking_index = 1.0 - (H_intermediate / H_initiation)
+
+        return chunking_index
+
     def traverse_path(self, source, target, tau, force_action=True, max_steps=100):
         """Traverse an implication chain from source to target, consulting oracle when uncertain."""
         if source not in self.literals:

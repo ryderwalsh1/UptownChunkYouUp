@@ -695,6 +695,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
     policy_lambdas = []
     captured_episodes = []
     policy_losses = []
+    chunking_indices = []
+    per_step_entropies_list = []
 
     # Running average for episode lengths
     all_eval_lengths = []
@@ -793,14 +795,28 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
                 policy_loss = test_loss_policy(policy_net, graph, num_vars)
             policy_losses.append(policy_loss)
 
+            # Compute per-step entropies and chunking index for the training trajectory
+            if training_mode == 'fixed_pair':
+                per_step_data = policy_net.per_step_entropy(fixed_trajectory, fixed_target)
+                chunking_idx = policy_net.chunking_index(fixed_trajectory, fixed_target)
+            else:
+                # For random sampling, use the most recent trajectory
+                per_step_data = policy_net.per_step_entropy(trajectory, target_literal)
+                chunking_idx = policy_net.chunking_index(trajectory, target_literal)
+
+            per_step_entropies_list.append(per_step_data)
+            chunking_indices.append(chunking_idx)
+
             # Log progress
             if verbose:
+                chunking_idx_str = f"{chunking_idx:.4f}" if chunking_idx is not None else "None"
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Chunkability: {policy_avg_chunkability:.4f} | "
                       f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
+                      f"Chunking Index: {chunking_idx_str} | "
                       f"Policy Loss: {policy_loss:.4f}")
 
     # Capture final weight matrices
@@ -834,6 +850,8 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
         'policy_lambdas': policy_lambdas,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
+        'chunking_indices': chunking_indices,
+        'per_step_entropies_list': per_step_entropies_list,
         'final_policy_matrices': final_policy_matrices,
         'entropy_threshold': entropy_threshold,
         'superlinearity': superlinearity
@@ -914,6 +932,8 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
     captured_episodes = []
     policy_losses = []
     value_losses = []
+    chunking_indices = []
+    per_step_entropies_list = []
 
     # Running average for episode lengths
     all_eval_lengths = []
@@ -1013,14 +1033,28 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
             value_loss = test_loss_value(policy_net, graph, num_vars)
             value_losses.append(value_loss)
 
+            # Compute per-step entropies and chunking index for the training trajectory
+            if training_mode == 'fixed_pair':
+                per_step_data = policy_net.per_step_entropy(fixed_trajectory, fixed_target)
+                chunking_idx = policy_net.chunking_index(fixed_trajectory, fixed_target)
+            else:
+                # For random sampling, use the most recent trajectory
+                per_step_data = policy_net.per_step_entropy(trajectory, target_literal)
+                chunking_idx = policy_net.chunking_index(trajectory, target_literal)
+
+            per_step_entropies_list.append(per_step_data)
+            chunking_indices.append(chunking_idx)
+
             # Log progress
             if verbose:
+                chunking_idx_str = f"{chunking_idx:.4f}" if chunking_idx is not None else "None"
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Chunkability: {policy_avg_chunkability:.4f} | "
                       f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
+                      f"Chunking Index: {chunking_idx_str} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
@@ -1082,6 +1116,8 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
+        'chunking_indices': chunking_indices,
+        'per_step_entropies_list': per_step_entropies_list,
         'final_policy_matrices': final_policy_matrices,
         'final_value_matrices': final_value_matrices,
         'entropy_threshold': entropy_threshold,
@@ -1108,6 +1144,13 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
     os.makedirs(f'{save_dir}/metrics', exist_ok=True)
     os.makedirs(f'{save_dir}/final_weights/{experiment_name}', exist_ok=True)
     os.makedirs(f'{save_dir}/plots', exist_ok=True)
+    os.makedirs(f'{save_dir}/stats', exist_ok=True)
+
+    # Save full stats as pickle for complete plotting functionality
+    import pickle
+    with open(f'{save_dir}/stats/{experiment_name}_stats.pkl', 'wb') as f:
+        pickle.dump(stats, f)
+    print(f"  - Stats pickle: {save_dir}/stats/{experiment_name}_stats.pkl")
 
     # Save policy success rates
     with open(f'{save_dir}/metrics/{experiment_name}_policy_success_rates.csv', 'w', newline='') as f:
@@ -1150,6 +1193,14 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         writer.writerow(['episode', 'policy_lambda'])
         for episode, lambda_val in zip(stats['captured_episodes'], stats['policy_lambdas']):
             writer.writerow([episode, lambda_val])
+
+    # Save chunking indices
+    if 'chunking_indices' in stats:
+        with open(f'{save_dir}/metrics/{experiment_name}_chunking_indices.csv', 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['episode', 'chunking_index'])
+            for episode, ci in zip(stats['captured_episodes'], stats['chunking_indices']):
+                writer.writerow([episode, ci if ci is not None else 'None'])
 
     # Save policy losses
     with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
@@ -1428,7 +1479,7 @@ if __name__ == "__main__":
     elif training_mode == 'td_n':
         # TD(λ) hyperparameters
         gamma = 0.99  # Discount factor
-        lambda_exponent = 2.5  # Lambda modulation: λ = chunkability^lambda_exponent
+        lambda_exponent = 2  # Lambda modulation: λ = chunkability^lambda_exponent
         oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
         entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
