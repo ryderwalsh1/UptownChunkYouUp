@@ -370,109 +370,6 @@ class PolicyNetwork():
         return correct / num_samples if num_samples > 0 else 0.0
     
     
-    def _decision_entropy(self, action_vector):
-        '''
-        determines the entropy of the action vector.
-        Args:
-            action_vector: np.array - the variable from which entropy will be calculated.
-        Returns:
-            entropy: float - the entropy of the action_vector'''
-        # Handle zero probabilities: 0 * log(0) = 0
-        # Create a mask for non-zero values
-        non_zero_mask = action_vector > 0
-
-        # Calculate entropy only for non-zero probabilities
-        entropy = -np.sum(action_vector[non_zero_mask] * np.log2(action_vector[non_zero_mask]))
-
-        return entropy
-
-    def per_step_entropy(self, path, target_literal, gamma=0.99, lambda_=0.0):
-        """
-        Compute the policy entropy at each decision point in a trajectory.
-
-        Args:
-            path: list[int] - full trajectory including terminal state
-                  (e.g., [15, -10, 3, 14])
-            target_literal: int - goal node
-            gamma: float - discount factor for context trace decay
-            lambda_: float - trace decay parameter (default 0.0 for no context)
-
-        Returns:
-            dict with:
-              'entropies': list[float] - H(pi) at each non-terminal state
-              'states': list[int] - the states where decisions were made
-              'total_entropy': float - sum of per-step entropies (Hick's law proxy)
-        """
-        entropies = []
-        states = []
-
-        # Build context traces for the trajectory
-        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
-
-        # Iterate through all non-terminal states (all except the last)
-        for i in range(len(path) - 1):
-            current_literal = path[i]
-            states.append(current_literal)
-
-            # Get policy prediction for this state with context
-            prediction = self.predict(current_literal, target_literal, context=contexts[i])
-
-            # Compute entropy
-            entropy = self._decision_entropy(prediction.flatten())
-            entropies.append(entropy)
-
-        # Compute total entropy (sum)
-        total_entropy = np.sum(entropies) if len(entropies) > 0 else 0.0
-
-        return {
-            'entropies': entropies,
-            'states': states,
-            'total_entropy': total_entropy
-        }
-
-    def chunking_index(self, path, target_literal):
-        """
-        Compute how much the trajectory behaves as a single chunk vs independent steps.
-
-        chunking_index = 1 - (H_intermediate / H_initiation)
-
-        where H_initiation is entropy at the first decision point and
-        H_intermediate is mean entropy at all subsequent decision points.
-
-        Args:
-            path: list[int] - full trajectory including terminal state
-            target_literal: int - goal node
-
-        Returns:
-            float or None:
-                - 0.0 = no chunking (uniform entropy)
-                - approaches 1.0 = full chunking (intermediate steps deterministic)
-                - can be negative if intermediate steps are MORE uncertain than initiation
-                - None if trajectory has fewer than 2 decision points or H_initiation is too small
-        """
-        # Get per-step entropies
-        per_step_data = self.per_step_entropy(path, target_literal)
-        entropies = per_step_data['entropies']
-
-        # Need at least 2 decision points to compute chunking index
-        if len(entropies) < 2:
-            return None
-
-        # Extract H_initiation (first decision point)
-        H_initiation = entropies[0]
-
-        # Handle edge case: if H_initiation is too small, index is undefined
-        if H_initiation < 1e-8:
-            return None
-
-        # Extract H_intermediate (mean of all subsequent decision points)
-        H_intermediate = np.mean(entropies[1:])
-
-        # Compute chunking index
-        chunking_index = 1.0 - (H_intermediate / H_initiation)
-
-        return chunking_index
-    
     def traverse_path(self, source, target, tau, force_action=True,
                       max_steps=100, gamma=0.99, lambda_=0.0):
         '''
@@ -552,7 +449,9 @@ class PolicyNetwork():
                 break
 
             # Calculate entropy of the prediction vector
-            entropy = self._decision_entropy(prediction.flatten())
+            prediction_flat = prediction.flatten()
+            non_zero_mask = prediction_flat > 0
+            entropy = -np.sum(prediction_flat[non_zero_mask] * np.log2(prediction_flat[non_zero_mask]))
 
             # Determine next literal to take based on entropy and force_action
             if entropy > tau:
@@ -863,7 +762,9 @@ class PolicyNetwork():
             policy_output = self.policy_output.parameters.value.get(self.policy)
 
             # Compute entropy
-            entropy = self._decision_entropy(policy_output.flatten())
+            policy_flat = policy_output.flatten()
+            non_zero_mask = policy_flat > 0
+            entropy = -np.sum(policy_flat[non_zero_mask] * np.log2(policy_flat[non_zero_mask]))
             entropies.append(entropy)
 
         if len(entropies) == 0:

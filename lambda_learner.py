@@ -486,7 +486,8 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         #     print(action_dist)
 
         # Compute entropy of the policy's action distribution (before masking)
-        entropy = policy_net._decision_entropy(action_dist)
+        non_zero_mask = action_dist > 0
+        entropy = -np.sum(action_dist[non_zero_mask] * np.log2(action_dist[non_zero_mask]))
         entropies.append(entropy)
 
         # Choose action: apply entropy-based mixing if threshold is set
@@ -719,8 +720,6 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
     captured_episodes = []
     policy_losses = []
     value_losses = []
-    chunking_indices = []
-    per_step_entropies_list = []
 
     # Running average for episode lengths
     all_eval_lengths = []
@@ -820,28 +819,14 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
             value_loss = test_loss_value(policy_net, graph, num_vars)
             value_losses.append(value_loss)
 
-            # Compute per-step entropies and chunking index for the training trajectory
-            if training_mode == 'fixed_pair':
-                per_step_data = policy_net.per_step_entropy(fixed_trajectory, fixed_target)
-                chunking_idx = policy_net.chunking_index(fixed_trajectory, fixed_target)
-            else:
-                # For random sampling, use the most recent trajectory
-                per_step_data = policy_net.per_step_entropy(trajectory, target_literal)
-                chunking_idx = policy_net.chunking_index(trajectory, target_literal)
-
-            per_step_entropies_list.append(per_step_data)
-            chunking_indices.append(chunking_idx)
-
             # Log progress
             if verbose:
-                chunking_idx_str = f"{chunking_idx:.4f}" if chunking_idx is not None else "None"
                 print(f"Episode {episode + 1}/{num_episodes} | "
                       f"Success: {policy_success_rate:.2%} | "
                       f"Avg Len: {policy_avg_length:.1f} | "
                       f"Avg Entropy: {policy_avg_entropy:.4f} | "
                       f"Chunkability: {policy_avg_chunkability:.4f} | "
                       f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
-                      f"Chunking Index: {chunking_idx_str} | "
                       f"Policy Loss: {policy_loss:.4f} | "
                       f"Value Loss: {value_loss:.4f}")
 
@@ -903,8 +888,6 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
         'captured_episodes': captured_episodes,
         'policy_losses': policy_losses,
         'value_losses': value_losses,
-        'chunking_indices': chunking_indices,
-        'per_step_entropies_list': per_step_entropies_list,
         'final_policy_matrices': final_policy_matrices,
         'final_value_matrices': final_value_matrices,
         'entropy_threshold': entropy_threshold,
@@ -980,14 +963,6 @@ def save_results(stats, experiment_name, save_dir='results/td_n'):
         writer.writerow(['episode', 'policy_lambda'])
         for episode, lambda_val in zip(stats['captured_episodes'], stats['policy_lambdas']):
             writer.writerow([episode, lambda_val])
-
-    # Save chunking indices
-    if 'chunking_indices' in stats:
-        with open(f'{save_dir}/metrics/{experiment_name}_chunking_indices.csv', 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['episode', 'chunking_index'])
-            for episode, ci in zip(stats['captured_episodes'], stats['chunking_indices']):
-                writer.writerow([episode, ci if ci is not None else 'None'])
 
     # Save policy losses
     with open(f'{save_dir}/metrics/{experiment_name}_policy_losses.csv', 'w', newline='') as f:
