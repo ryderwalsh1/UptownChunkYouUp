@@ -648,240 +648,6 @@ def train_combined(policy_net, trajectory, target_literal, num_vars, gamma=0.99,
 
 
 # ============================================================================
-# Teacher Forcing Main Training Loop
-# ============================================================================
-
-def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
-                          max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
-                          training_mode='random_sampling', fixed_source=None, fixed_target=None,
-                          entropy_threshold=1.5, oracle_sensitivity=10.0, superlinearity=2.0):
-    """
-    Train policy network using episodic teacher forcing (no value network).
-
-    Args:
-        policy_net: PolicyNetwork - policy network to train
-        graph: nx.DiGraph - implication graph
-        num_vars: int - number of variables
-        num_episodes: int - number of training episodes
-        max_steps: int - maximum trajectory length to consider (skip if longer)
-        capture_interval: int - how often to capture weights, evaluate policy, and log progress
-        eval_episodes: int - number of episodes to run for policy evaluation
-        verbose: bool - whether to print progress
-        training_mode: str - 'random_sampling' (default) or 'fixed_pair'
-        fixed_source: int or None - source literal for fixed pair training (required if training_mode='fixed_pair')
-        fixed_target: int or None - target literal for fixed pair training (required if training_mode='fixed_pair')
-        entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
-        oracle_sensitivity: float - controls steepness of sigmoid transition (default 10.0)
-        superlinearity: float - exponent for lambda statistic computation (default 2.0)
-
-    Returns:
-        dict - training statistics (policy success_rate, avg_episode_length, policy_loss)
-    """
-    # Get all valid (source, target) pairs from next_steps
-    next_steps = gen_impgraph.compute_next_steps(graph, num_vars)
-    valid_pairs = list(next_steps.keys())
-
-    print(f"Found {len(valid_pairs)} valid (source, target) pairs in graph")
-
-    if len(valid_pairs) == 0:
-        raise ValueError("No valid (source, target) pairs found in graph")
-
-    # Validate training mode and fixed pair arguments
-    if training_mode == 'fixed_pair':
-        if fixed_source is None or fixed_target is None:
-            raise ValueError("Both fixed_source and fixed_target must be provided when training_mode='fixed_pair'")
-
-        # Check if the fixed pair exists in valid pairs
-        if (fixed_source, fixed_target) not in valid_pairs:
-            raise ValueError(f"Fixed pair ({fixed_source}, {fixed_target}) is not a valid (source, target) pair in the graph")
-
-        # Verify there's a valid trajectory for the fixed pair
-        fixed_trajectory = generate_trajectory_from_graph(fixed_source, fixed_target, graph)
-        if fixed_trajectory is None or len(fixed_trajectory) > max_steps:
-            raise ValueError(f"No valid trajectory found for fixed pair ({fixed_source}, {fixed_target}) or trajectory exceeds max_steps")
-
-        print(f"Training on fixed pair: ({fixed_source}, {fixed_target}) with trajectory length {len(fixed_trajectory)}")
-    elif training_mode == 'random_sampling':
-        print(f"Training on random sampling from all valid pairs")
-    else:
-        raise ValueError(f"Invalid training_mode: {training_mode}. Must be 'random_sampling' or 'fixed_pair'")
-
-    # Tracking metrics for policy evaluation
-    policy_success_rates = []
-    policy_avg_lengths = []  # Running average
-    policy_block_lengths = []  # Per-evaluation-block average
-    policy_avg_entropies = []
-    policy_chunkabilities = []
-    policy_oracle_call_probs = []
-    policy_lambdas = []
-    captured_episodes = []
-    policy_losses = []
-    chunking_indices = []
-    per_step_entropies_list = []
-
-    # Running average for episode lengths
-    all_eval_lengths = []
-
-    # Training loop
-    for episode in range(num_episodes):
-        # Select (source, target) pair based on training mode
-        if training_mode == 'fixed_pair':
-            # Use the fixed pair for all episodes
-            source_literal = fixed_source
-            target_literal = fixed_target
-            trajectory = fixed_trajectory  # Already validated above
-        else:  # random_sampling
-            # Sample random (source, target) pair until we get a valid trajectory
-            trajectory = None
-            while trajectory is None or len(trajectory) > max_steps:
-                source_literal, target_literal = random.choice(valid_pairs)
-                trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
-
-        # Train policy network on optimal trajectory (teacher forcing)
-        train_policy(policy_net, trajectory, target_literal, num_vars)
-
-        # Capture metrics and log at intervals
-        if (episode + 1) % capture_interval == 0:
-            captured_episodes.append(episode + 1)
-
-            # Evaluate policy (use fixed pair if specified)
-            eval_successes = 0
-            eval_lengths = []
-            eval_entropies = []
-            eval_chunkabilities = []
-            eval_confidences = []
-
-            if training_mode == 'fixed_pair':
-                # Evaluate only on the fixed pair
-                for _ in range(eval_episodes):
-                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
-                        policy_net, fixed_source, fixed_target, graph, num_vars, max_steps,
-                        entropy_threshold, oracle_sensitivity
-                    )
-
-                    # print(f"trajectory: {eval_trajectory} | reached_goal: {eval_reached_goal} | entropy: {eval_entropy:.4f}")
-
-                    if eval_reached_goal:
-                        eval_successes += 1
-                    eval_lengths.append(len(eval_trajectory))
-                    eval_entropies.append(eval_entropy)
-                    eval_chunkabilities.append(eval_chunkability)
-                    eval_confidences.append(eval_confidence)
-            else:
-                # Evaluate on random episodes
-                for _ in range(eval_episodes):
-                    eval_source, eval_target = random.choice(valid_pairs)
-                    eval_trajectory, eval_reached_goal, eval_entropy, eval_chunkability, eval_confidence = run_episode(
-                        policy_net, eval_source, eval_target, graph, num_vars, max_steps,
-                        entropy_threshold, oracle_sensitivity
-                    )
-
-                    if eval_reached_goal:
-                        eval_successes += 1
-                    eval_lengths.append(len(eval_trajectory))
-                    eval_entropies.append(eval_entropy)
-                    eval_chunkabilities.append(eval_chunkability)
-                    eval_confidences.append(eval_confidence)
-
-            # Record policy evaluation metrics
-            policy_success_rate = eval_successes / eval_episodes
-            policy_success_rates.append(policy_success_rate)
-
-            # Record both per-block and running average for episode lengths
-            policy_block_length = np.mean(eval_lengths)
-            policy_block_lengths.append(policy_block_length)
-
-            all_eval_lengths.extend(eval_lengths)
-            policy_avg_length = np.mean(all_eval_lengths)
-            policy_avg_lengths.append(policy_avg_length)
-
-            policy_avg_entropy = np.mean(eval_entropies)
-            policy_avg_entropies.append(policy_avg_entropy)
-
-            policy_avg_chunkability = np.mean(eval_chunkabilities)
-            policy_chunkabilities.append(policy_avg_chunkability)
-
-            policy_avg_oracle_call_prob = 1.0 - np.mean(eval_confidences)
-            policy_oracle_call_probs.append(policy_avg_oracle_call_prob)
-
-            # Compute lambda statistic: lambda = chunkability^superlinearity
-            policy_lambda = policy_avg_chunkability ** superlinearity
-            policy_lambdas.append(policy_lambda)
-
-            # Capture network loss (use fixed pair if specified)
-            if training_mode == 'fixed_pair':
-                policy_loss = test_loss_policy(policy_net, graph, num_vars,
-                                               fixed_source=fixed_source, fixed_target=fixed_target)
-            else:
-                policy_loss = test_loss_policy(policy_net, graph, num_vars)
-            policy_losses.append(policy_loss)
-
-            # Compute per-step entropies and chunking index for the training trajectory
-            if training_mode == 'fixed_pair':
-                per_step_data = policy_net.per_step_entropy(fixed_trajectory, fixed_target)
-                chunking_idx = policy_net.chunking_index(fixed_trajectory, fixed_target)
-            else:
-                # For random sampling, use the most recent trajectory
-                per_step_data = policy_net.per_step_entropy(trajectory, target_literal)
-                chunking_idx = policy_net.chunking_index(trajectory, target_literal)
-
-            per_step_entropies_list.append(per_step_data)
-            chunking_indices.append(chunking_idx)
-
-            # Log progress
-            if verbose:
-                chunking_idx_str = f"{chunking_idx:.4f}" if chunking_idx is not None else "None"
-                print(f"Episode {episode + 1}/{num_episodes} | "
-                      f"Success: {policy_success_rate:.2%} | "
-                      f"Avg Len: {policy_avg_length:.1f} | "
-                      f"Avg Entropy: {policy_avg_entropy:.4f} | "
-                      f"Chunkability: {policy_avg_chunkability:.4f} | "
-                      f"Oracle Call Prob: {policy_avg_oracle_call_prob:.4f} | "
-                      f"Chunking Index: {chunking_idx_str} | "
-                      f"Policy Loss: {policy_loss:.4f}")
-
-    # Capture final weight matrices
-    if isinstance(policy_net, PolicyNetworkPC):
-        # For PolicyNetworkPC, extract from PyTorch model attributes
-        source_to_hidden = policy_net.source_linear.weight.data.T.cpu().numpy()
-        target_to_hidden = policy_net.target_linear.weight.data.T.cpu().numpy()
-        hidden_to_output = policy_net.output_linear.weight.data.T.cpu().numpy()
-
-        final_policy_matrices = {
-            'source_to_hidden': source_to_hidden.copy(),
-            'target_to_hidden': target_to_hidden.copy(),
-            'hidden_to_output': hidden_to_output.copy()
-        }
-    else:
-        # For PolicyNetwork, extract from PsyNeuLink
-        final_policy_matrices = {
-            'source_to_hidden': policy_net.source_to_hidden.matrix.base.copy(),
-            'target_to_hidden': policy_net.target_to_hidden.matrix.base.copy(),
-            'hidden_to_output': policy_net.hidden_to_output.matrix.base.copy()
-        }
-
-    # Compute final statistics
-    stats = {
-        'policy_success_rates': policy_success_rates,
-        'policy_avg_lengths': policy_avg_lengths,  # Running average
-        'policy_block_lengths': policy_block_lengths,  # Per-block average
-        'policy_avg_entropies': policy_avg_entropies,
-        'policy_chunkabilities': policy_chunkabilities,
-        'policy_oracle_call_probs': policy_oracle_call_probs,
-        'policy_lambdas': policy_lambdas,
-        'captured_episodes': captured_episodes,
-        'policy_losses': policy_losses,
-        'chunking_indices': chunking_indices,
-        'per_step_entropies_list': per_step_entropies_list,
-        'final_policy_matrices': final_policy_matrices,
-        'entropy_threshold': entropy_threshold,
-        'superlinearity': superlinearity
-    }
-
-    return stats
-
-
-# ============================================================================
 # Main Training Loop
 # ============================================================================
 
@@ -1400,10 +1166,6 @@ if __name__ == "__main__":
     # ========================================================================
     # Configuration
     # ========================================================================
-
-    # Choose training mode: 'teacher_forcing' or 'td_n'
-    training_mode = 'td_n'
-
     # Implication graph parameters
     num_vars = 16
     num_clauses = 25
@@ -1426,152 +1188,80 @@ if __name__ == "__main__":
     # Number of training episodes
     num_episodes = 20000
 
-    # ========================================================================
-    # Teacher Forcing Mode
-    # ========================================================================
-    if training_mode == 'teacher_forcing':
-        # Create experiment name
-        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_teacher_forcing'
+    # TD(λ) hyperparameters
+    gamma = 0.99  # Discount factor
+    lambda_exponent = 2  # Lambda modulation: λ = chunkability^lambda_exponent
+    oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
+    entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
-        # Save graph for reference
-        # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
-        # with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
-        #     pickle.dump(graph, f)
-        # print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
-        # gen_impgraph.visualize_graph(graph)
-        # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
+    # Create experiment name
+    experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
 
-        # Option: Load pre-trained weights
-        # policy_weights_dir = 'results/off_policy/learned_matrices/impgraph_8v_10c'
-        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy', epoch=450)
-        policy_weights = None  # Set to None for fresh start
+    # Save graph for reference
+    # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+    # with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+    #     pickle.dump(graph, f)
+    # print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+    # gen_impgraph.visualize_graph(graph)
+    # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
-        # Create policy network (no value network needed for teacher forcing)
-        policy_net = PolicyNetworkPC(
-            num_vars=num_vars,
-            graph=graph,
-            policy_name='TeacherForcing_Policy',
-            hidden_size=hidden_size,
-            learning_rate=policy_learning_rate,
-            source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
-            target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
-            hidden_to_output_matrix=policy_weights[2] if policy_weights else None
-        )
+    # Option: Load pre-trained weights (e.g., from teacher forcing or previous runs)
+    # Uncomment to load weights:
+    # policy_weights_dir = 'results/td_n/final_weights/impgraph_16v_25c_teacher_forcing'
+    # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy')
+    # hidden_to_value_path = os.path.join(policy_weights_dir, 'policy_hidden_to_value.npy')
+    # hidden_to_value_matrix = np.load(hidden_to_value_path) if os.path.exists(hidden_to_value_path) else None
+    policy_weights = None  # Set to None for fresh start
+    hidden_to_value_matrix = None
 
-        print(f"Training with Teacher Forcing (Episodic)")
-        print(f"Graph: {num_vars} vars, {num_clauses} clauses")
-        print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
-        print()
+    # Create policy network with both policy and value heads
+    policy_net = PolicyNetworkPC(
+        num_vars=num_vars,
+        graph=graph,
+        policy_name='TDLambda_Policy',
+        hidden_size=hidden_size,
+        learning_rate=policy_learning_rate,
+        source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
+        target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
+        hidden_to_output_matrix=policy_weights[2] if policy_weights else None,
+        hidden_to_value_matrix=hidden_to_value_matrix
+    )
 
-        # Train using teacher forcing
-        stats = train_teacher_forcing(
-            policy_net=policy_net,
-            graph=graph,
-            num_vars=num_vars,
-            num_episodes=num_episodes,
-            max_steps=5,
-            capture_interval=10,
-            eval_episodes=50,
-            training_mode="fixed_pair",
-            fixed_source=15,
-            fixed_target=14,
-            entropy_threshold=0.5,
-            superlinearity=2.5,
-            verbose=True
-        )
+    print(f"Training TD(λ) with chunkability-modulated λ")
+    print(f"  gamma={gamma}, lambda_exponent={lambda_exponent}")
+    print(f"Graph: {num_vars} vars, {num_clauses} clauses")
+    print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+    print()
 
-        print("\n" + "="*60)
-        print("Training Complete!")
-        if len(stats['policy_success_rates']) > 0:
-            print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
-            print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
-        print(f"Training Episodes: {num_episodes}")
-        print("="*60)
+    # Train
+    stats = train_td_n(
+        policy_net=policy_net,
+        graph=graph,
+        num_vars=num_vars,
+        num_episodes=num_episodes,
+        gamma=gamma,
+        lambda_exponent=lambda_exponent,
+        max_steps=50,
+        capture_interval=10,
+        verbose=True,
+        training_mode='fixed_pair',
+        fixed_source=15,
+        fixed_target=-12,
+        entropy_threshold=entropy_threshold,
+        oracle_sensitivity=oracle_sensitivity,
+        update_value=True
+    )
 
-        # Save results
-        save_results(stats, experiment_name)
+    print("\n" + "="*60)
+    print("Training Complete!")
+    if len(stats['policy_success_rates']) > 0:
+        print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
+        print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
+    print(f"Training Episodes: {num_episodes}")
+    print("="*60)
 
-        # Plot training curves
-        plot_training_curves(stats, experiment_name)
+    # Save results
+    save_results(stats, experiment_name)
 
-    # ========================================================================
-    # TD(λ) Mode (with chunkability-modulated λ)
-    # ========================================================================
-    elif training_mode == 'td_n':
-        # TD(λ) hyperparameters
-        gamma = 0.99  # Discount factor
-        lambda_exponent = 2  # Lambda modulation: λ = chunkability^lambda_exponent
-        oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
-        entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
-
-        # Create experiment name
-        experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
-
-        # Save graph for reference
-        # os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
-        # with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
-        #     pickle.dump(graph, f)
-        # print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
-        # gen_impgraph.visualize_graph(graph)
-        # plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
-
-        # Option: Load pre-trained weights (e.g., from teacher forcing or previous runs)
-        # Uncomment to load weights:
-        # policy_weights_dir = 'results/td_n/final_weights/impgraph_16v_25c_teacher_forcing'
-        # policy_weights = load_weight_matrices(policy_weights_dir, network_type='policy')
-        # hidden_to_value_path = os.path.join(policy_weights_dir, 'policy_hidden_to_value.npy')
-        # hidden_to_value_matrix = np.load(hidden_to_value_path) if os.path.exists(hidden_to_value_path) else None
-        policy_weights = None  # Set to None for fresh start
-        hidden_to_value_matrix = None
-
-        # Create policy network with both policy and value heads
-        policy_net = PolicyNetworkPC(
-            num_vars=num_vars,
-            graph=graph,
-            policy_name='TDLambda_Policy',
-            hidden_size=hidden_size,
-            learning_rate=policy_learning_rate,
-            source_to_hidden_matrix=policy_weights[0] if policy_weights else None,
-            target_to_hidden_matrix=policy_weights[1] if policy_weights else None,
-            hidden_to_output_matrix=policy_weights[2] if policy_weights else None,
-            hidden_to_value_matrix=hidden_to_value_matrix
-        )
-
-        print(f"Training TD(λ) with chunkability-modulated λ")
-        print(f"  gamma={gamma}, lambda_exponent={lambda_exponent}")
-        print(f"Graph: {num_vars} vars, {num_clauses} clauses")
-        print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
-        print()
-
-        # Train
-        stats = train_td_n(
-            policy_net=policy_net,
-            graph=graph,
-            num_vars=num_vars,
-            num_episodes=num_episodes,
-            gamma=gamma,
-            lambda_exponent=lambda_exponent,
-            max_steps=50,
-            capture_interval=10,
-            verbose=True,
-            training_mode='fixed_pair',
-            fixed_source=15,
-            fixed_target=-12,
-            entropy_threshold=entropy_threshold,
-            oracle_sensitivity=oracle_sensitivity,
-            update_value=True
-        )
-
-        print("\n" + "="*60)
-        print("Training Complete!")
-        if len(stats['policy_success_rates']) > 0:
-            print(f"Final Policy Success Rate: {stats['policy_success_rates'][-1]:.2%}")
-            print(f"Final Policy Avg Episode Length: {stats['policy_avg_lengths'][-1]:.2f}")
-        print(f"Training Episodes: {num_episodes}")
-        print("="*60)
-
-        # Save results
-        save_results(stats, experiment_name)
-
-        # Plot training curves
-        plot_training_curves(stats, experiment_name)
+    # Plot training curves
+    plot_training_curves(stats, experiment_name)
