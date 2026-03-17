@@ -859,7 +859,7 @@ class PolicyNetwork():
             }
         )
 
-    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5):
+    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5, update_value=True):
         """
         Perform one combined training step that trains both policy and value heads.
 
@@ -869,6 +869,7 @@ class PolicyNetwork():
             rewards: np.array or None - reward at each step (default: sparse terminal [0,0,...,1])
             gamma: float - discount factor for TD(λ)
             lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
+            update_value: bool - if True, update value head; if False, only update policy head
 
         Returns:
             dict - diagnostics containing:
@@ -928,11 +929,13 @@ class PolicyNetwork():
             value_source_encodings.append(source_encoding)
             value_target_encodings.append(target_encoding)
 
-        self.update_value_batch(
-            np.array(value_source_encodings),
-            np.array(value_target_encodings),
-            value_targets
-        )
+        # 6. Train value head with TD(λ) targets (if enabled)
+        if update_value:
+            self.update_value_batch(
+                np.array(value_source_encodings),
+                np.array(value_target_encodings),
+                value_targets
+            )
 
         # 7. Return diagnostics
         diagnostics = {

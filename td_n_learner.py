@@ -587,7 +587,7 @@ def train_policy(policy_net, trajectory, target_literal, num_vars):
 # Combined Training Function (using value head in policy network)
 # ============================================================================
 
-def train_combined(policy_net, trajectory, target_literal, num_vars, gamma=0.99, lambda_exponent=2.5):
+def train_combined(policy_net, trajectory, target_literal, num_vars, gamma=0.99, lambda_exponent=2.5, update_value=True):
     """
     Train both policy and value heads on a trajectory using the combined learning approach.
 
@@ -619,7 +619,8 @@ def train_combined(policy_net, trajectory, target_literal, num_vars, gamma=0.99,
         target_literal=target_literal,
         rewards=rewards,
         gamma=gamma,
-        lambda_exponent=lambda_exponent
+        lambda_exponent=lambda_exponent,
+        update_value=update_value
     )
 
     return diagnostics
@@ -848,7 +849,7 @@ def train_teacher_forcing(policy_net, graph, num_vars, num_episodes=1000,
 def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
                gamma=0.99, max_steps=100, capture_interval=50, eval_episodes=10, verbose=True,
                training_mode='random_sampling', fixed_source=None, fixed_target=None,
-               entropy_threshold=1.5, oracle_sensitivity=5.0, lambda_exponent=2.5):
+               entropy_threshold=1.5, oracle_sensitivity=5.0, lambda_exponent=2.5, update_value=True):
     """
     Train policy network with dual heads (policy + value) using TD(λ) with chunkability-modulated λ.
 
@@ -868,6 +869,7 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
         entropy_threshold: float or None - center point for entropy-based mixing (default 1.5)
         oracle_sensitivity: float - controls steepness of sigmoid transition (default 5.0)
         lambda_exponent: float - exponent for lambda modulation (λ = chunkability^lambda_exponent, default 2.5)
+        update_value: bool - whether to update the value head during training (default True)
 
     Returns:
         dict - training statistics (policy success_rate, avg_episode_length, etc.)
@@ -932,7 +934,7 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
                 trajectory = generate_trajectory_from_graph(source_literal, target_literal, graph)
 
         # Train both policy and value heads using combined learning
-        diagnostics = train_combined(policy_net, trajectory, target_literal, num_vars, gamma=gamma, lambda_exponent=lambda_exponent)
+        diagnostics = train_combined(policy_net, trajectory, target_literal, num_vars, gamma=gamma, lambda_exponent=lambda_exponent, update_value=update_value)
 
         # Capture metrics and log at intervals
         if (episode + 1) % capture_interval == 0:
@@ -1023,17 +1025,17 @@ def train_td_n(policy_net, graph, num_vars, num_episodes=1000,
                       f"Value Loss: {value_loss:.4f}")
 
                 # Print value head outputs for the most recent training trajectory
-                print(f"  Value Head Outputs (trajectory: {' -> '.join(str(s) for s in trajectory)}, goal: {target_literal}):")
-                value_estimates = diagnostics.get('value_estimates', np.array([]))
-                value_targets = diagnostics.get('value_targets', np.array([]))
-                lambda_ = diagnostics.get('lambda_', 0.0)
-                chunkability_diag = diagnostics.get('chunkability', 0.0)
-                print(f"    λ={lambda_:.4f} (chunkability={chunkability_diag:.4f})")
-                for step_i, literal in enumerate(trajectory):
-                    v_est = value_estimates[step_i] if step_i < len(value_estimates) else float('nan')
-                    v_tgt = value_targets[step_i] if step_i < len(value_targets) else float('nan')
-                    at_goal = " (GOAL)" if literal == target_literal else ""
-                    print(f"    state={literal:>3}{at_goal}  V(s)={v_est:>8.4f}  TD(λ) target={v_tgt:>8.4f}")
+                # print(f"  Value Head Outputs (trajectory: {' -> '.join(str(s) for s in trajectory)}, goal: {target_literal}):")
+                # value_estimates = diagnostics.get('value_estimates', np.array([]))
+                # value_targets = diagnostics.get('value_targets', np.array([]))
+                # lambda_ = diagnostics.get('lambda_', 0.0)
+                # chunkability_diag = diagnostics.get('chunkability', 0.0)
+                # print(f"    λ={lambda_:.4f} (chunkability={chunkability_diag:.4f})")
+                # for step_i, literal in enumerate(trajectory):
+                #     v_est = value_estimates[step_i] if step_i < len(value_estimates) else float('nan')
+                #     v_tgt = value_targets[step_i] if step_i < len(value_targets) else float('nan')
+                #     at_goal = " (GOAL)" if literal == target_literal else ""
+                #     print(f"    state={literal:>3}{at_goal}  V(s)={v_est:>8.4f}  TD(λ) target={v_tgt:>8.4f}")
 
     # Capture final weight matrices
     if isinstance(policy_net, PolicyNetworkPC):
@@ -1346,11 +1348,11 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.32
+    policy_learning_rate = 0.2
     value_learning_rate = 0.5
 
     # Number of training episodes
-    num_episodes = 3000
+    num_episodes = 20000
 
     # ========================================================================
     # Teacher Forcing Mode
@@ -1482,9 +1484,10 @@ if __name__ == "__main__":
             verbose=True,
             training_mode='fixed_pair',
             fixed_source=15,
-            fixed_target=14,
+            fixed_target=-12,
             entropy_threshold=entropy_threshold,
-            oracle_sensitivity=oracle_sensitivity
+            oracle_sensitivity=oracle_sensitivity,
+            update_value=True
         )
 
         print("\n" + "="*60)

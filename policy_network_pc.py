@@ -982,7 +982,7 @@ class PolicyNetworkPC():
             loss.backward()
             self.optimizer.step()
 
-    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5):
+    def learn_combined_step(self, path, target_literal, rewards=None, gamma=0.99, lambda_exponent=2.5, update_value=True):
         """
         Perform one combined training step that trains both policy and value heads.
 
@@ -992,6 +992,7 @@ class PolicyNetworkPC():
             rewards: np.array or None - reward at each step (default: sparse terminal [0,0,...,1])
             gamma: float - discount factor for TD(λ)
             lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
+            update_value: bool - if True, update value head; if False, only update policy head
 
         Returns:
             dict - diagnostics containing:
@@ -1034,28 +1035,29 @@ class PolicyNetworkPC():
         # 5. Compute TD(λ) value targets
         value_targets = lambda_values(rewards, value_estimates, gamma, lambda_)
 
-        # 6. Train value head with TD(λ) targets
-        # Prepare encodings for all states in path
-        value_source_encodings = []
-        value_target_encodings = []
+        # 6. Train value head with TD(λ) targets (if enabled)
+        if update_value:
+            # Prepare encodings for all states in path
+            value_source_encodings = []
+            value_target_encodings = []
 
-        target_idx = self.literal_to_idx(target_literal)
-        target_encoding = np.zeros(self.num_literals)
-        target_encoding[target_idx] = 1.0
+            target_idx = self.literal_to_idx(target_literal)
+            target_encoding = np.zeros(self.num_literals)
+            target_encoding[target_idx] = 1.0
 
-        for literal in path:
-            source_idx = self.literal_to_idx(literal)
-            source_encoding = np.zeros(self.num_literals)
-            source_encoding[source_idx] = 1.0
+            for literal in path:
+                source_idx = self.literal_to_idx(literal)
+                source_encoding = np.zeros(self.num_literals)
+                source_encoding[source_idx] = 1.0
 
-            value_source_encodings.append(source_encoding)
-            value_target_encodings.append(target_encoding)
+                value_source_encodings.append(source_encoding)
+                value_target_encodings.append(target_encoding)
 
-        self.update_value_batch(
-            np.array(value_source_encodings),
-            np.array(value_target_encodings),
-            value_targets
-        )
+            self.update_value_batch(
+                np.array(value_source_encodings),
+                np.array(value_target_encodings),
+                value_targets
+            )
 
         # 7. Return diagnostics
         diagnostics = {
