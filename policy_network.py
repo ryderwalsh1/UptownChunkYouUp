@@ -33,6 +33,9 @@ class PolicyNetwork():
         self.hidden_size = hidden_size
         self.learning_rate = learning_rate
 
+        # Context trace for eligibility-based sequential memory
+        self.context_trace = np.zeros(self.num_literals)
+
         # Create policy network input nodes
         self.policy_source_input = pnl.ProcessingMechanism(
             name=f'{policy_name}_Source_Input',
@@ -44,7 +47,13 @@ class PolicyNetwork():
             input_shapes=self.num_literals
         )
 
-        # Hidden layer receives projections from both source and target inputs
+        # Context trace input
+        self.policy_context_input = pnl.ProcessingMechanism(
+            name=f'{policy_name}_Context_Input',
+            input_shapes=self.num_literals
+        )
+
+        # Hidden layer receives projections from source, target, and context inputs
         self.policy_hidden = pnl.ProcessingMechanism(
             name=f'{policy_name}_Hidden',
             input_shapes=hidden_size,
@@ -83,6 +92,18 @@ class PolicyNetwork():
             self.target_to_hidden = pnl.MappingProjection(
                 matrix=(0.2*np.random.rand(self.num_literals, hidden_size) - 0.1)
             )
+
+        # context input to hidden
+        context_to_hidden_matrix = kwargs.get("context_to_hidden_matrix", None)
+        if context_to_hidden_matrix is not None:
+            self.context_to_hidden = pnl.MappingProjection(
+                matrix=context_to_hidden_matrix
+            )
+        else:
+            self.context_to_hidden = pnl.MappingProjection(
+                matrix=(0.2*np.random.rand(self.num_literals, hidden_size) - 0.1)
+            )
+
         # hidden to output
         if hidden_to_output_matrix is not None:
             self.hidden_to_output = pnl.MappingProjection(
@@ -113,6 +134,9 @@ class PolicyNetwork():
         policy_comp.add_linear_processing_pathway(
             [self.policy_target_input, self.target_to_hidden, self.policy_hidden, self.hidden_to_output, self.policy_output]
         )
+        policy_comp.add_linear_processing_pathway(
+            [self.policy_context_input, self.context_to_hidden, self.policy_hidden, self.hidden_to_output, self.policy_output]
+        )
 
         # Add value head processing pathways (shares hidden layer with policy head)
         policy_comp.add_linear_processing_pathway(
@@ -120,6 +144,9 @@ class PolicyNetwork():
         )
         policy_comp.add_linear_processing_pathway(
             [self.policy_target_input, self.target_to_hidden, self.policy_hidden, self.hidden_to_value, self.policy_value_output]
+        )
+        policy_comp.add_linear_processing_pathway(
+            [self.policy_context_input, self.context_to_hidden, self.policy_hidden, self.hidden_to_value, self.policy_value_output]
         )
 
         # Policy head learning pathways
@@ -131,6 +158,10 @@ class PolicyNetwork():
             pathway=[self.policy_target_input, self.policy_hidden, self.policy_output],
             learning_rate=learning_rate
         )
+        policy_comp.add_backpropagation_learning_pathway(
+            pathway=[self.policy_context_input, self.policy_hidden, self.policy_output],
+            learning_rate=learning_rate
+        )
 
         # Value head learning pathways
         policy_comp.add_backpropagation_learning_pathway(
@@ -139,6 +170,10 @@ class PolicyNetwork():
         )
         policy_comp.add_backpropagation_learning_pathway(
             pathway=[self.policy_target_input, self.policy_hidden, self.policy_value_output],
+            learning_rate=learning_rate
+        )
+        policy_comp.add_backpropagation_learning_pathway(
+            pathway=[self.policy_context_input, self.policy_hidden, self.policy_value_output],
             learning_rate=learning_rate
         )
 
@@ -182,11 +217,13 @@ class PolicyNetwork():
 
     def test_accuracy(self):
         correct = 0
+        context_encoding = np.zeros(self.num_literals)
         for i in range(len(self.memories)):
             retrieved = self.policy.run(
                 inputs={
                     self.policy_source_input: self.training_sources[i],
-                    self.policy_target_input: self.training_targets[i]
+                    self.policy_target_input: self.training_targets[i],
+                    self.policy_context_input: context_encoding
                 }
             )
             index = np.argmax(retrieved)
@@ -198,11 +235,13 @@ class PolicyNetwork():
 
     def test_loss(self):
         total_loss = 0.0
+        context_encoding = np.zeros(self.num_literals)
         for i in range(len(self.memories)):
             retrieved = self.policy.run(
                 inputs={
                     self.policy_source_input: self.training_sources[i],
-                    self.policy_target_input: self.training_targets[i]
+                    self.policy_target_input: self.training_targets[i],
+                    self.policy_context_input: context_encoding
                 }
             )
             loss = self._mse(retrieved.flatten(), self.expected_answers[i])
@@ -313,12 +352,14 @@ class PolicyNetwork():
         """
         correct = 0
         num_samples = len(trajectory_sources)
+        context_encoding = np.zeros(self.num_literals)
 
         for i in range(num_samples):
             retrieved = self.policy.run(
                 inputs={
                     self.policy_source_input: trajectory_sources[i],
-                    self.policy_target_input: trajectory_targets[i]
+                    self.policy_target_input: trajectory_targets[i],
+                    self.policy_context_input: context_encoding
                 }
             )
             predicted_index = np.argmax(retrieved)
@@ -350,6 +391,9 @@ class PolicyNetwork():
             'target_to_hidden': [],
             'hidden_to_output': []
         }
+        # Zero context for off-policy batch learning
+        context_batch = np.zeros((len(self.training_sources), self.num_literals))
+
         for epoch in range(epochs):
             if epoch % capture_interval == 0:
                 loss = self.test_loss()
@@ -361,6 +405,7 @@ class PolicyNetwork():
                 inputs={
                     self.policy_source_input: self.training_sources,
                     self.policy_target_input: self.training_targets,
+                    self.policy_context_input: context_batch,
                     self.target_node: self.expected_answers
                 }
             )
@@ -416,6 +461,9 @@ class PolicyNetwork():
             visited_literals = [source_literal]
             step_count = 0
 
+            # Reset context trace at start of each trajectory
+            self.reset_context()
+
             # Navigate from source to target
             while step_count < max_steps:
                 # Get current literal index
@@ -428,11 +476,15 @@ class PolicyNetwork():
                 target_encoding = np.zeros(self.num_literals)
                 target_encoding[target_idx] = 1
 
+                # Get current context (before updating with current state)
+                context_encoding = self.context_trace.copy()
+
                 # Get policy network prediction
                 prediction = self.policy.run(
                     inputs={
                         self.policy_source_input: source_encoding,
-                        self.policy_target_input: target_encoding
+                        self.policy_target_input: target_encoding,
+                        self.policy_context_input: context_encoding
                     }
                 )
                 predicted_literal_idx = np.argmax(prediction)
@@ -456,9 +508,14 @@ class PolicyNetwork():
                     inputs={
                         self.policy_source_input: [source_encoding],
                         self.policy_target_input: [target_encoding],
+                        self.policy_context_input: [context_encoding],
                         self.target_node: [answer_encoding]
                     }
                 )
+
+                # Update context trace with current state (for next step)
+                # Note: We use decay=0 here since on-policy learning doesn't have lambda modulation
+                self.update_context(current_literal, decay=0.0)
 
                 # Determine which literal to use for position update
                 if position_update == 'predicted':
@@ -517,7 +574,7 @@ class PolicyNetwork():
 
         return entropy
 
-    def per_step_entropy(self, path, target_literal):
+    def per_step_entropy(self, path, target_literal, gamma=0.99, lambda_=0.0):
         """
         Compute the policy entropy at each decision point in a trajectory.
 
@@ -525,6 +582,8 @@ class PolicyNetwork():
             path: list[int] - full trajectory including terminal state
                   (e.g., [15, -10, 3, 14])
             target_literal: int - goal node
+            gamma: float - discount factor for context trace decay
+            lambda_: float - trace decay parameter (default 0.0 for no context)
 
         Returns:
             dict with:
@@ -535,13 +594,16 @@ class PolicyNetwork():
         entropies = []
         states = []
 
+        # Build context traces for the trajectory
+        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
+
         # Iterate through all non-terminal states (all except the last)
         for i in range(len(path) - 1):
             current_literal = path[i]
             states.append(current_literal)
 
-            # Get policy prediction for this state
-            prediction = self.predict(current_literal, target_literal)
+            # Get policy prediction for this state with context
+            prediction = self.predict(current_literal, target_literal, context=contexts[i])
 
             # Compute entropy
             entropy = self._decision_entropy(prediction.flatten())
@@ -600,7 +662,7 @@ class PolicyNetwork():
         return chunking_index
     
     def traverse_path(self, source, target, tau, force_action=True,
-                      max_steps=100):
+                      max_steps=100, gamma=0.99, lambda_=0.0):
         '''
         traverses an implication chain from source to target literal. Consults the oracle
         (self.next_steps) for the correct next literal should the entropy of the policy output
@@ -613,6 +675,8 @@ class PolicyNetwork():
                 the oracle (True) or its own prediction (False) in the event of confident but
                 wrong decisions made by the policy network.
             max_steps: integer - maximum number of steps the policy network can take before its solution has diverged
+            gamma: float - discount factor for context trace decay
+            lambda_: float - trace decay parameter (default 0.0 for no context)
         Returns:
             path: list[int] - list of literals traversed
             oracle_calls: list[boolean] - list of booleans corresponding to literals traversed,
@@ -635,6 +699,10 @@ class PolicyNetwork():
         accuracy = []
         step_count = 0
 
+        # Reset context trace at start of trajectory
+        self.reset_context()
+        decay = gamma * lambda_
+
         target_idx = self.literal_to_idx(target)
 
         # Main navigation loop
@@ -649,11 +717,15 @@ class PolicyNetwork():
             target_encoding = np.zeros(self.num_literals)
             target_encoding[target_idx] = 1
 
+            # Get current context (before updating with current state)
+            context_encoding = self.context_trace.copy()
+
             # Get policy network prediction
             prediction = self.policy.run(
                 inputs={
                     self.policy_source_input: source_encoding,
-                    self.policy_target_input: target_encoding
+                    self.policy_target_input: target_encoding,
+                    self.policy_context_input: context_encoding
                 }
             )
             predicted_literal_idx = np.argmax(prediction)
@@ -686,6 +758,9 @@ class PolicyNetwork():
                 else:
                     next_literal = predicted_literal
 
+            # Update context trace with current state (for next step)
+            self.update_context(current_literal, decay)
+
             # Update current literal
             current_literal = next_literal
             path.append(current_literal)
@@ -702,13 +777,14 @@ class PolicyNetwork():
 
         return path, oracle_calls, accuracy
 
-    def predict(self, source, target):
+    def predict(self, source, target, context=None):
         """
         Predict the next literal in the implication chain.
 
         Args:
             source: int or array - source literal (int) or one-hot encoding (array)
             target: int or array - target literal (int) or one-hot encoding (array)
+            context: np.array or None - context trace encoding (defaults to self.context_trace)
 
         Returns:
             numpy array: policy network output prediction (action logits/probabilities over all literals)
@@ -725,15 +801,20 @@ class PolicyNetwork():
             source_array = source
             target_array = target
 
+        # Use provided context or default to current context trace
+        if context is None:
+            context = self.context_trace.copy()
+
         prediction = self.policy.run(
             inputs={
                 self.policy_source_input: source_array,
-                self.policy_target_input: target_array
+                self.policy_target_input: target_array,
+                self.policy_context_input: context
             }
         )
         return prediction
     
-    def update_single(self, source_encoding, target_encoding, policy_target):
+    def update_single(self, source_encoding, target_encoding, policy_target, context_encoding=None):
         """
         Perform a single learning update for one (state, goal, target) tuple.
 
@@ -741,16 +822,21 @@ class PolicyNetwork():
             source_encoding: np.array - one-hot encoding of current state
             target_encoding: np.array - one-hot encoding of goal state
             policy_target: np.array - soft target distribution over next states
+            context_encoding: np.array or None - context trace encoding (defaults to zeros)
         """
+        if context_encoding is None:
+            context_encoding = np.zeros(self.num_literals)
+
         self.policy.learn(
             inputs={
                 self.policy_source_input: [source_encoding],
                 self.policy_target_input: [target_encoding],
+                self.policy_context_input: [context_encoding],
                 self.target_node: [policy_target]
             }
         )
     
-    def update_batch(self, source_encodings, target_encodings, policy_targets):
+    def update_batch(self, source_encodings, target_encodings, policy_targets, context_encodings=None):
         """
         Perform a batch learning update for multiple (state, goal, target) tuples.
 
@@ -758,11 +844,16 @@ class PolicyNetwork():
             source_encodings: np.array - shape (batch_size, num_literals) of one-hot encodings for current states
             target_encodings: np.array - shape (batch_size, num_literals) of one-hot encodings for goal states
             policy_targets: np.array - shape (batch_size, num_literals) of soft target distributions over next states
+            context_encodings: np.array or None - shape (batch_size, num_literals) of context traces (defaults to zeros)
         """
+        if context_encodings is None:
+            context_encodings = np.zeros((len(source_encodings), self.num_literals))
+
         self.policy.learn(
             inputs={
                 self.policy_source_input: source_encodings,
                 self.policy_target_input: target_encodings,
+                self.policy_context_input: context_encodings,
                 self.target_node: policy_targets
             }
         )
@@ -777,16 +868,72 @@ class PolicyNetwork():
         return mse
 
     # ========================================================================
+    # Context Trace Methods
+    # ========================================================================
+
+    def reset_context(self):
+        """Reset the context trace to zeros (start of a new trajectory)."""
+        self.context_trace = np.zeros(self.num_literals)
+
+    def update_context(self, current_literal, decay):
+        """
+        Update the context trace with the current state using eligibility trace dynamics.
+
+        This is mathematically identical to accumulating eligibility traces:
+          E(s) ← decay * E(s)  for all s    (decay all)
+          E(S) ← E(S) + 1                   (bump current)
+
+        Args:
+            current_literal: int - the state just visited
+            decay: float - decay rate, should be gamma * lambda where lambda
+                   is the chunkability-modulated trace parameter
+
+        Returns:
+            np.array - the updated context trace (also stored in self.context_trace)
+        """
+        self.context_trace = decay * self.context_trace
+        current_idx = self.literal_to_idx(current_literal)
+        self.context_trace[current_idx] += 1.0
+        return self.context_trace.copy()
+
+    def build_trajectory_contexts(self, path, gamma, lambda_):
+        """
+        Build context trace vectors for each step in a trajectory.
+
+        Args:
+            path: list[int] - full trajectory
+            gamma: float - discount factor
+            lambda_: float - trace decay parameter (chunkability-modulated)
+
+        Returns:
+            list[np.array] - context vector for each step in path
+        """
+        contexts = []
+        trace = np.zeros(self.num_literals)
+        decay = gamma * lambda_
+
+        for i, literal in enumerate(path):
+            # Store current context BEFORE updating with this state
+            contexts.append(trace.copy())
+            # Update trace with current state
+            idx = self.literal_to_idx(literal)
+            trace = decay * trace
+            trace[idx] += 1.0
+
+        return contexts
+
+    # ========================================================================
     # Value Head Methods
     # ========================================================================
 
-    def compute_value(self, source_literal, target_literal):
+    def compute_value(self, source_literal, target_literal, context=None):
         """
         Compute value estimate for a single (state, goal) pair.
 
         Args:
             source_literal: int - current state literal
             target_literal: int - goal literal
+            context: np.array or None - context trace encoding (defaults to zeros)
 
         Returns:
             float - scalar value estimate
@@ -800,11 +947,16 @@ class PolicyNetwork():
         target_encoding = np.zeros(self.num_literals)
         target_encoding[target_idx] = 1.0
 
+        # Use provided context or default to zeros
+        if context is None:
+            context = np.zeros(self.num_literals)
+
         # Run forward pass through value head only
         result = self.policy.run(
             inputs={
                 self.policy_source_input: source_encoding,
-                self.policy_target_input: target_encoding
+                self.policy_target_input: target_encoding,
+                self.policy_context_input: context
             }
         )
 
@@ -812,13 +964,15 @@ class PolicyNetwork():
         value_output = self.policy_value_output.parameters.value.get(self.policy)
         return float(value_output[0])
 
-    def compute_trajectory_values(self, path, target_literal):
+    def compute_trajectory_values(self, path, target_literal, gamma=0.99, lambda_=0.0):
         """
         Compute value estimates for all states in a trajectory.
 
         Args:
             path: list[int] - trajectory of literals
             target_literal: int - goal literal
+            gamma: float - discount factor for context trace decay
+            lambda_: float - trace decay parameter (default 0.0 for no context)
 
         Returns:
             np.array - value estimates for each state in path, shape (len(path),)
@@ -828,16 +982,20 @@ class PolicyNetwork():
         target_encoding = np.zeros(self.num_literals)
         target_encoding[target_idx] = 1.0
 
+        # Build context traces for the trajectory
+        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
+
         for i, literal in enumerate(path):
             source_idx = self.literal_to_idx(literal)
             source_encoding = np.zeros(self.num_literals)
             source_encoding[source_idx] = 1.0
 
-            # Run forward pass
+            # Run forward pass with context
             self.policy.run(
                 inputs={
                     self.policy_source_input: source_encoding,
-                    self.policy_target_input: target_encoding
+                    self.policy_target_input: target_encoding,
+                    self.policy_context_input: contexts[i]
                 }
             )
 
@@ -847,7 +1005,7 @@ class PolicyNetwork():
 
         return values
 
-    def chunkability_from_trajectory(self, path, target_literal):
+    def chunkability_from_trajectory(self, path, target_literal, gamma=0.99, lambda_=0.0):
         """
         Compute chunkability (corridor-likeness) of a trajectory.
 
@@ -857,6 +1015,8 @@ class PolicyNetwork():
         Args:
             path: list[int] - trajectory of literals
             target_literal: int - goal literal
+            gamma: float - discount factor for context trace decay
+            lambda_: float - trace decay parameter (default 0.0 for no context)
 
         Returns:
             float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
@@ -869,17 +1029,21 @@ class PolicyNetwork():
         target_encoding = np.zeros(self.num_literals)
         target_encoding[target_idx] = 1.0
 
+        # Build context traces for the trajectory
+        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
+
         # Compute entropy at each step (excluding the final state)
         for i in range(len(path) - 1):
             source_idx = self.literal_to_idx(path[i])
             source_encoding = np.zeros(self.num_literals)
             source_encoding[source_idx] = 1.0
 
-            # Get policy prediction
+            # Get policy prediction with context
             self.policy.run(
                 inputs={
                     self.policy_source_input: source_encoding,
-                    self.policy_target_input: target_encoding
+                    self.policy_target_input: target_encoding,
+                    self.policy_context_input: contexts[i]
                 }
             )
 
@@ -899,7 +1063,7 @@ class PolicyNetwork():
 
         return np.mean(chunkability_values)
 
-    def update_value_single(self, source_encoding, target_encoding, value_target):
+    def update_value_single(self, source_encoding, target_encoding, value_target, context_encoding=None):
         """
         Perform a single value head update for one (state, goal, value_target) tuple.
 
@@ -907,7 +1071,11 @@ class PolicyNetwork():
             source_encoding: np.array - one-hot encoding of current state
             target_encoding: np.array - one-hot encoding of goal state
             value_target: float or np.array - scalar value target
+            context_encoding: np.array or None - context trace encoding (defaults to zeros)
         """
+        if context_encoding is None:
+            context_encoding = np.zeros(self.num_literals)
+
         # Ensure value_target is in array form
         if isinstance(value_target, (int, float)):
             value_target = np.array([value_target])
@@ -916,11 +1084,12 @@ class PolicyNetwork():
             inputs={
                 self.policy_source_input: [source_encoding],
                 self.policy_target_input: [target_encoding],
+                self.policy_context_input: [context_encoding],
                 self.value_target_node: [value_target]
             }
         )
 
-    def update_value_batch(self, source_encodings, target_encodings, value_targets):
+    def update_value_batch(self, source_encodings, target_encodings, value_targets, context_encodings=None):
         """
         Perform a batch value head update for multiple (state, goal, value_target) tuples.
 
@@ -928,7 +1097,11 @@ class PolicyNetwork():
             source_encodings: np.array - shape (batch_size, num_literals)
             target_encodings: np.array - shape (batch_size, num_literals)
             value_targets: np.array - shape (batch_size,) or (batch_size, 1)
+            context_encodings: np.array or None - shape (batch_size, num_literals) of context traces (defaults to zeros)
         """
+        if context_encodings is None:
+            context_encodings = np.zeros((len(source_encodings), self.num_literals))
+
         # Ensure value_targets is 2D
         if len(value_targets.shape) == 1:
             value_targets = value_targets.reshape(-1, 1)
@@ -937,6 +1110,7 @@ class PolicyNetwork():
             inputs={
                 self.policy_source_input: source_encodings,
                 self.policy_target_input: target_encodings,
+                self.policy_context_input: context_encodings,
                 self.value_target_node: value_targets
             }
         )
@@ -975,26 +1149,32 @@ class PolicyNetwork():
             rewards = np.zeros(len(path))
             rewards[-1] = 1.0
 
-        # 1. Train policy head with teacher-forced one-hot targets
+        # 1. Compute chunkability (using zero context, since we don't know lambda yet)
+        chunkability = self.chunkability_from_trajectory(path, target_literal, gamma=gamma, lambda_=0.0)
+
+        # 2. Derive lambda from chunkability
+        lambda_ = chunkability ** lambda_exponent
+
+        # 3. Build context traces with the derived lambda
+        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
+
+        # 4. Train policy head with teacher-forced one-hot targets and context traces
         trajectory_sources, trajectory_targets, trajectory_answers = \
             self._get_trajectory_subset(path, target_literal)
 
         if len(trajectory_sources) > 0:
-            self.update_batch(trajectory_sources, trajectory_targets, trajectory_answers)
+            # Build context traces for the trajectory steps (excluding terminal state)
+            trajectory_contexts = contexts[:len(trajectory_sources)]
+            self.update_batch(trajectory_sources, trajectory_targets, trajectory_answers,
+                            context_encodings=np.array(trajectory_contexts))
 
-        # 2. Compute current value estimates
-        value_estimates = self.compute_trajectory_values(path, target_literal)
+        # 5. Compute value estimates with context traces
+        value_estimates = self.compute_trajectory_values(path, target_literal, gamma=gamma, lambda_=lambda_)
 
-        # 3. Compute chunkability
-        chunkability = self.chunkability_from_trajectory(path, target_literal)
-
-        # 4. Derive lambda from chunkability
-        lambda_ = chunkability ** lambda_exponent
-
-        # 5. Compute TD(λ) value targets
+        # 6. Compute TD(λ) value targets
         value_targets = lambda_values(rewards, value_estimates, gamma, lambda_)
 
-        # 6. Train value head with TD(λ) targets
+        # 7. Train value head with TD(λ) targets (if enabled)
         # Prepare encodings for all states in path
         value_source_encodings = []
         value_target_encodings = []
@@ -1011,15 +1191,15 @@ class PolicyNetwork():
             value_source_encodings.append(source_encoding)
             value_target_encodings.append(target_encoding)
 
-        # 6. Train value head with TD(λ) targets (if enabled)
         if update_value:
             self.update_value_batch(
                 np.array(value_source_encodings),
                 np.array(value_target_encodings),
-                value_targets
+                value_targets,
+                context_encodings=np.array(contexts)
             )
 
-        # 7. Return diagnostics
+        # 8. Return diagnostics
         diagnostics = {
             'chunkability': chunkability,
             'lambda_': lambda_,

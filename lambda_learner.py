@@ -287,8 +287,9 @@ def test_loss_policy(policy_net, graph, num_vars, num_samples=None, fixed_source
             source_encoding = np.zeros(2 * num_vars)
             source_encoding[current_idx] = 1.0
 
-            # Get policy prediction
-            action_dist = policy_net.predict(source_encoding, target_encoding).flatten()
+            # Get policy prediction with zero context
+            context_encoding = np.zeros(2 * num_vars)
+            action_dist = policy_net.predict(source_encoding, target_encoding, context=context_encoding).flatten()
 
             # Apply action masking
             # masked_dist = mask_action_distribution(action_dist, adjacent_literals, num_vars)
@@ -414,7 +415,7 @@ def compute_trajectory_chunkability(entropies):
     return np.mean(chunkability_values)
 
 
-def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, oracle_sensitivity=5.0):
+def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max_steps=100, entropy_threshold=1.5, oracle_sensitivity=5.0, gamma=0.99, lambda_=0.0):
     """
     Execute one episode from source to target using the policy network with entropy-based mixing.
 
@@ -428,6 +429,8 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         entropy_threshold: float or None - center point for entropy-based mixing; if None, always samples
                                            from policy distribution without mixing
         oracle_sensitivity: float - controls steepness of sigmoid transition (higher = sharper)
+        gamma: float - discount factor for context trace decay
+        lambda_: float - trace decay parameter (default 0.0 for no context)
 
     Returns:
         tuple: (trajectory, reached_goal, avg_entropy, chunkability, confidence)
@@ -441,6 +444,10 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
     trajectory = [source_literal]
     entropies = []
     policy_weights = []
+
+    # Reset context trace at start of episode
+    policy_net.reset_context()
+    decay = gamma * lambda_
 
     target_idx = literal_to_token_idx(target_literal, num_vars)
 
@@ -468,8 +475,11 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
         target_encoding = np.zeros(2 * num_vars)
         target_encoding[target_idx] = 1.0
 
-        # Get policy prediction
-        action_dist = policy_net.predict(source_encoding, target_encoding).flatten()
+        # Get current context (before updating)
+        context_encoding = policy_net.context_trace.copy()
+
+        # Get policy prediction with context
+        action_dist = policy_net.predict(source_encoding, target_encoding, context=context_encoding).flatten()
 
         # if step == 0:
         #     print(f"Initial policy distribution for source {current_literal} to next -6:")
@@ -516,6 +526,9 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 
         next_literal = token_idx_to_literal(next_idx, num_vars)
 
+        # Update context trace with current state (for next step)
+        policy_net.update_context(current_literal, decay)
+
         # Update state
         current_literal = next_literal
         trajectory.append(current_literal)
@@ -532,7 +545,7 @@ def run_episode(policy_net, source_literal, target_literal, graph, num_vars, max
 # Teacher Forcing Training Functions
 # ============================================================================
 
-def train_policy(policy_net, trajectory, target_literal, num_vars):
+def train_policy(policy_net, trajectory, target_literal, num_vars, gamma=0.99, lambda_=0.0):
     """
     Train policy network on a trajectory using episodic teacher forcing.
     Updates are applied at every step during the episode, with the target
@@ -544,16 +557,22 @@ def train_policy(policy_net, trajectory, target_literal, num_vars):
         trajectory: list[int] - sequence of literals from source to target (optimal path)
         target_literal: int - goal literal
         num_vars: int - number of variables
+        gamma: float - discount factor for context trace decay
+        lambda_: float - trace decay parameter (default 0.0 for no context)
     """
     vocab_size = 2 * num_vars
     target_idx = literal_to_token_idx(target_literal, num_vars)
     target_encoding = np.zeros(vocab_size)
     target_encoding[target_idx] = 1.0
 
+    # Build context traces for the trajectory
+    contexts = policy_net.build_trajectory_contexts(trajectory, gamma, lambda_)
+
     # Prepare batch data for entire trajectory
     source_encodings = []
     target_encodings = []
     policy_targets = []
+    context_encodings = []
 
     # Collect all training examples from trajectory
     for t in range(len(trajectory) - 1):
@@ -573,13 +592,15 @@ def train_policy(policy_net, trajectory, target_literal, num_vars):
         source_encodings.append(source_encoding)
         target_encodings.append(target_encoding)
         policy_targets.append(policy_target)
+        context_encodings.append(contexts[t])
 
     # Apply batch update for entire trajectory (matching mlpcomposition.py format)
     if len(source_encodings) > 0:
         policy_net.update_batch(
             np.array(source_encodings),
             np.array(target_encodings),
-            np.array(policy_targets)
+            np.array(policy_targets),
+            context_encodings=np.array(context_encodings)
         )
 
 
