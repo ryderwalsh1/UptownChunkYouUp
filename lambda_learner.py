@@ -1071,25 +1071,25 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
 
     # Add dashed line for entropy threshold if it exists
     if 'entropy_threshold' in stats and stats['entropy_threshold'] is not None:
-        ax_entropy.axhline(y=stats['entropy_threshold'], color='red', linestyle='--', linewidth=2, label=f'Threshold = {stats["entropy_threshold"]:.2f}')
+        ax_entropy.axhline(y=stats['entropy_threshold'], color='red', linestyle='--', linewidth=2, label=r'Threshold $H_\tau$'+f' = {stats["entropy_threshold"]:.2f}')
         ax_entropy.legend()
 
     ax_entropy.set_xlabel('Training Episode')
     ax_entropy.set_ylabel('Policy Average Entropy')
-    ax_entropy.set_title('Policy Average Entropy over Training')
+    ax_entropy.set_title('Policy Average Entropy H over Training')
     ax_entropy.grid(True, alpha=0.3)
 
     # Policy loss
     ax_policy_loss.plot(stats['captured_episodes'], stats['policy_losses'], 'r-', linewidth=2)
     ax_policy_loss.set_xlabel('Training Episode')
-    ax_policy_loss.set_ylabel('Policy Loss (Cross-Entropy)')
-    ax_policy_loss.set_title('Policy Network Loss over Training')
+    ax_policy_loss.set_ylabel(r'$\mathcal{L}_\pi$')
+    ax_policy_loss.set_title(r'Policy Network Loss $\mathcal{L}_\pi$ over Training')
     ax_policy_loss.grid(True, alpha=0.3)
 
     # Chunkability
     ax_chunkability.plot(stats['captured_episodes'], stats['policy_chunkabilities'], 'purple', linewidth=2)
     ax_chunkability.set_xlabel('Training Episode')
-    ax_chunkability.set_ylabel('Chunkability (Corridor-likeness)')
+    ax_chunkability.set_ylabel('Chunkability')
     ax_chunkability.set_title('Policy Chunkability over Training')
     ax_chunkability.grid(True, alpha=0.3)
     ax_chunkability.set_ylim([0, 1.05])
@@ -1098,7 +1098,7 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     ax_oracle_call_prob.plot(stats['captured_episodes'], stats['policy_oracle_call_probs'], 'brown', linewidth=2)
     ax_oracle_call_prob.set_xlabel('Training Episode')
     ax_oracle_call_prob.set_ylabel('Oracle Call Probability')
-    ax_oracle_call_prob.set_title('Oracle Call Probability over Training')
+    ax_oracle_call_prob.set_title('Oracle Call Probability (1-p) over Training')
     ax_oracle_call_prob.grid(True, alpha=0.3)
     ax_oracle_call_prob.set_ylim([0, 1.05])
 
@@ -1106,16 +1106,16 @@ def plot_training_curves(stats, experiment_name, save_dir='results/td_n', show=F
     if has_value_loss:
         ax_value_loss.plot(stats['captured_episodes'], stats['value_losses'], 'm-', linewidth=2)
         ax_value_loss.set_xlabel('Training Episode')
-        ax_value_loss.set_ylabel('Value Loss (MSE)')
-        ax_value_loss.set_title('Value Network Loss over Training')
+        ax_value_loss.set_ylabel(r'$\mathcal{L}_V$')
+        ax_value_loss.set_title(r'Value Network Loss $\mathcal{L}_V$ over Training')
         ax_value_loss.grid(True, alpha=0.3)
 
     # Lambda statistic (chunkability^superlinearity)
     superlinearity = stats.get('superlinearity', 2.0)
     ax_lambda.plot(stats['captured_episodes'], stats['policy_lambdas'], 'teal', linewidth=2)
     ax_lambda.set_xlabel('Training Episode')
-    ax_lambda.set_ylabel(f'Lambda (Chunkability^{superlinearity:.1f})')
-    ax_lambda.set_title(f'Lambda Statistic over Training')
+    ax_lambda.set_ylabel(r'$\lambda$')
+    ax_lambda.set_title(r'$\lambda$ over Training')
     ax_lambda.grid(True, alpha=0.3)
     ax_lambda.set_ylim([0, 1.05])
 
@@ -1142,12 +1142,12 @@ if __name__ == "__main__":
     # Configuration
     # ========================================================================
     # Implication graph parameters
-    num_vars = 16
-    num_clauses = 25
+    num_vars = 32
+    num_clauses = 75
 
     # Option 1: Load an existing graph
     # Uncomment the following lines to load a saved graph:
-    graph_path = f'results/graphs/impgraph_{num_vars}v_{num_clauses}c_teacher_forcing/graph.pkl'
+    graph_path = f'results/graphs/impgraph_{num_vars}v_{num_clauses}c/graph.pkl'
     graph = load_graph(graph_path)
     print(f"Loaded graph from {graph_path}")
 
@@ -1157,17 +1157,16 @@ if __name__ == "__main__":
 
     # Network hyperparameters
     hidden_size = 25
-    policy_learning_rate = 0.2
-    value_learning_rate = 0.5
+    policy_learning_rate = 0.25
 
     # Number of training episodes
-    num_episodes = 20000
+    num_episodes = 50000
 
     # TD(λ) hyperparameters
     gamma = 0.99  # Discount factor
-    lambda_exponent = 2  # Lambda modulation: λ = chunkability^lambda_exponent
+    lambda_exponent = 2.5  # Lambda modulation: λ = chunkability^lambda_exponent
     oracle_sensitivity = 5.0  # Controls steepness of sigmoid transition for oracle calls
-    entropy_threshold = 0.5  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
+    entropy_threshold = 0.75  # Center point for entropy-based mixing (can be tuned based on observed policy entropies)
 
     # Create experiment name
     experiment_name = f'impgraph_{num_vars}v_{num_clauses}c_tdlambda'
@@ -1216,12 +1215,12 @@ if __name__ == "__main__":
         num_episodes=num_episodes,
         gamma=gamma,
         lambda_exponent=lambda_exponent,
-        max_steps=50,
+        max_steps=20,
         capture_interval=10,
         verbose=True,
         training_mode='fixed_pair',
-        fixed_source=15,
-        fixed_target=-12,
+        fixed_source=1,
+        fixed_target=4,
         entropy_threshold=entropy_threshold,
         oracle_sensitivity=oracle_sensitivity,
         update_value=True

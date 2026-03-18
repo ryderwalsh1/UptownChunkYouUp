@@ -2,7 +2,8 @@ import random
 import statistics
 import matplotlib.pyplot as plt
 import networkx as nx
-
+import pickle
+import os
 
 def generate_implication_graph(num_vars, num_clauses):
   """Generates a skew-symmetric implication graph using NetworkX.
@@ -256,43 +257,53 @@ def implications_to_memories(G, num_vars):
     return memories, memory_array, literal_to_idx
 
 def main():
-  NUM_VARS = 8
-  NUM_CLAUSES = 10
+    NUM_VARS = 32
+    NUM_CLAUSES = 75
 
-  G = generate_implication_graph(NUM_VARS, NUM_CLAUSES)
+    G = generate_implication_graph(NUM_VARS, NUM_CLAUSES)
 
-  edges = get_implications(G)
-  print(f"Total implications: {len(edges)}")
+    experiment_name = f'impgraph_{NUM_VARS}v_{NUM_CLAUSES}c'
 
-  print("\nSample Implications (Edges):")
-  for i, (u, v) in enumerate(edges[:5]):
-    print(f"  {u} -> {v}")
-  print("...\n")
+    edges = get_implications(G)
+    print(f"Total implications: {len(edges)}")
 
-  dataset = enumerate_examples(G, NUM_VARS)
-  print(f"Generated {len(dataset)} valid queries.\n")
+    print("\nSample Implications (Edges):")
+    for i, (u, v) in enumerate(edges[:5]):
+        print(f"  {u} -> {v}")
+        print("...\n")
 
-  # Calculate the number of edges for each path
-  path_lengths = [len(path) - 1 for _, _, _, path in dataset]
+    dataset = enumerate_examples(G, NUM_VARS)
+    print(f"Generated {len(dataset)} valid queries.\n")
 
-  min_len = min(path_lengths)
-  max_len = max(path_lengths)
-  avg_len = statistics.mean(path_lengths)
-  median_len = statistics.median(path_lengths)
+    # Calculate the number of edges for each path
+    path_lengths = [len(path) - 1 for _, _, _, path in dataset]
 
-  print("--- Path Length Statistics ---")
-  print(f"Minimum length: {min_len}")
-  print(f"Maximum length: {max_len}")
-  print(f"Average length: {avg_len:.2f}")
-  print(f"Median length:  {median_len}")
-  print("------------------------------\n")
+    min_len = min(path_lengths)
+    max_len = max(path_lengths)
+    avg_len = statistics.mean(path_lengths)
+    median_len = statistics.median(path_lengths)
 
-  for i, (s, t, ans, path) in enumerate(dataset[:5]):
-    path_str = " -> ".join(map(str, path))
-    print(f"Query: {s} |- {t} ? | Answer: {ans} | Path: {path_str}")
+    print("--- Path Length Statistics ---")
+    print(f"Minimum length: {min_len}")
+    print(f"Maximum length: {max_len}")
+    print(f"Average length: {avg_len:.2f}")
+    print(f"Median length:  {median_len}")
+    print("------------------------------\n")
 
-  # Moved outside the loop so it only visualizes once
-  visualize_graph(G)
+    for i, (s, t, ans, path) in enumerate(dataset[:5]):
+        path_str = " -> ".join(map(str, path))
+        print(f"Query: {s} |- {t} ? | Answer: {ans} | Path: {path_str}")
+
+    # Moved outside the loop so it only visualizes once
+    visualize_graph(G)
+
+    # Save graph for reference
+    os.makedirs(f'results/graphs/{experiment_name}', exist_ok=True)
+    with open(f'results/graphs/{experiment_name}/graph.pkl', 'wb') as f:
+        pickle.dump(G, f)
+    print(f"Saved graph to results/graphs/{experiment_name}/graph.pkl")
+    visualize_graph(G)
+    plt.savefig(f'results/graphs/{experiment_name}/graph_visualization.png', dpi=300, bbox_inches='tight')
 
 if __name__ == "__main__":
   main()
