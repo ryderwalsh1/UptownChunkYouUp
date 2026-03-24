@@ -135,7 +135,8 @@ class MazeGraph:
                     conn_count = self._count_connections(node1)
                     # Use corridor^8 for very dramatic effect - keeps 0.5 weak but 0.9+ very strong
                     # corridor=0.5 -> 0.0039, corridor=0.8 -> 0.168, corridor=0.9 -> 0.43
-                    corridor_factor = self.corridor ** 12
+                    corridor_factor = self.corridor*0.4 + 0.35
+                    corridor_factor = corridor_factor ** 12
 
                     if conn_count == 0:
                         weight = 1
@@ -261,8 +262,8 @@ class MazeGraph:
         ax.axis('off')
 
         # Add title with clean typography
-        if title is None:
-            title = f'Maze Graph (corridor = {self.corridor})'
+        # if title is None:
+        #     title = f'Maze Graph (corridor = {self.corridor})'
 
         ax.text(self.width / 2, -0.5, title,
                fontsize=16,
@@ -300,14 +301,52 @@ class MazeGraph:
 
 # Example usage
 if __name__ == "__main__":
+    import numpy as np
     # Test different corridor values
-    for corridor_val in [0.0, 0.5, 1.0]:
+    corridor_vals = np.arange(11) / 10.0  # Test 11 values from 0 to 1
+    # corridor_vals = [0.5]
+    all_stats = []
+
+    for corridor_val in corridor_vals:
         maze = MazeGraph(length=50, width=50, corridor=corridor_val, seed=42)
         stats = maze.get_stats()
+        all_stats.append(stats)
+
         print(f"\nCorridor={corridor_val}:")
         print(f"  Avg connections per node: {stats['avg_connections']:.2f}")
         print(f"  Nodes with 1 connection (dead ends): {stats['nodes_with_1_connection']}")
         print(f"  Nodes with 2 connections (corridors): {stats['nodes_with_2_connections']}")
         print(f"  Nodes with 3+ connections (junctions): {stats['nodes_with_3plus_connections']}")
 
-        maze.visualize()
+        maze.visualize(save_path=f'results/graphs/corridors/maze_corridor_{corridor_val:.1f}.png')
+
+    # Plot statistics across corridor values
+    fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+
+    dead_ends = [s['nodes_with_1_connection'] for s in all_stats]
+    corridors = [s['nodes_with_2_connections'] for s in all_stats]
+    junctions = [s['nodes_with_3plus_connections'] for s in all_stats]
+
+    x = range(len(corridor_vals))
+    width = 0.25
+
+    if True:
+        # Aesthetic colors matching the visualization
+        ax.bar([i - width for i in x], dead_ends, width, label='Dead ends (degree 1)',
+            color='#E63946', alpha=0.8, edgecolor='white', linewidth=1.5)
+        ax.bar(x, corridors, width, label='Corridors (degree 2)',
+            color='#A8DADC', alpha=0.8, edgecolor='white', linewidth=1.5)
+        ax.bar([i + width for i in x], junctions, width, label='Junctions (degree 3+)',
+            color='#1D3557', alpha=0.8, edgecolor='white', linewidth=1.5)
+
+        ax.set_xlabel('Corridor Parameter', fontsize=12, fontweight='500')
+        ax.set_ylabel('Number of Nodes', fontsize=12, fontweight='500')
+        ax.set_title('Node Type Distribution by Corridor Parameter', fontsize=14, fontweight='500')
+        ax.set_xticks(x)
+        ax.set_xticklabels(corridor_vals)
+        ax.legend(frameon=True, fancybox=True, shadow=False, framealpha=0.95)
+        ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.7)
+        ax.set_facecolor('#F8F9FA')
+
+        plt.tight_layout()
+        plt.show()
