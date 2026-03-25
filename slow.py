@@ -346,7 +346,15 @@ class SlowNetworkTrainer:
 
         # Compute advantages and returns
         advantages, returns = self.compute_gae(rewards, old_values, dones, next_value)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Normalize advantages (only if we have more than 1 sample)
+        if len(advantages) > 1:
+            adv_std = advantages.std()
+            if adv_std > 1e-8:
+                advantages = (advantages - advantages.mean()) / adv_std
+            else:
+                advantages = advantages - advantages.mean()
+        # If only 1 sample, no normalization needed
 
         # Recompute outputs with current network
         action_logits, values, _ = self.network(states, goals, memories)

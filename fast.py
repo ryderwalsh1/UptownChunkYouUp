@@ -169,6 +169,17 @@ class FastNetwork(nn.Module):
             Log probability of sampled action [batch_size]
         """
         probs = self.get_action_distribution(action_logits)
+
+        # Check for NaN or Inf
+        if torch.isnan(probs).any() or torch.isinf(probs).any():
+            print(f"WARNING: NaN or Inf detected in action probabilities!")
+            print(f"  action_logits: min={action_logits.min().item():.4f}, max={action_logits.max().item():.4f}")
+            print(f"  probs: min={probs.min().item():.4f}, max={probs.max().item():.4f}")
+            print(f"  Contains NaN: {torch.isnan(action_logits).any()}")
+            print(f"  Contains Inf: {torch.isinf(action_logits).any()}")
+            # Replace NaN/Inf with uniform distribution
+            probs = torch.ones_like(probs) / probs.shape[-1]
+
         dist = torch.distributions.Categorical(probs)
         action = dist.sample()
         log_prob = dist.log_prob(action)
@@ -329,8 +340,14 @@ class FastNetworkTrainer:
         # Compute advantages and returns using GAE
         advantages, returns = self.compute_gae(rewards, old_values, dones, next_value)
 
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Normalize advantages (only if we have more than 1 sample)
+        if len(advantages) > 1:
+            adv_std = advantages.std()
+            if adv_std > 1e-8:
+                advantages = (advantages - advantages.mean()) / adv_std
+            else:
+                advantages = advantages - advantages.mean()
+        # If only 1 sample, no normalization needed
 
         # Recompute outputs with current network
         action_logits_list = []
@@ -365,6 +382,21 @@ class FastNetworkTrainer:
 
         # Total loss
         loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+
+        # Check for NaN loss
+        if torch.isnan(loss):
+            print(f"WARNING: NaN loss detected! Skipping update.")
+            print(f"  policy_loss: {policy_loss.item()}")
+            print(f"  value_loss: {value_loss.item()}")
+            print(f"  entropy_loss: {entropy_loss.item()}")
+            return {
+                'loss': float('nan'),
+                'policy_loss': policy_loss.item() if not torch.isnan(policy_loss) else float('nan'),
+                'value_loss': value_loss.item() if not torch.isnan(value_loss) else float('nan'),
+                'entropy_loss': entropy_loss.item() if not torch.isnan(entropy_loss) else float('nan'),
+                'mean_entropy': 0.0,
+                'mean_value': 0.0
+            }
 
         # Optimize
         self.optimizer.zero_grad()
