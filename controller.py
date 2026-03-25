@@ -151,6 +151,15 @@ class MetaController(nn.Module):
             Full probability distribution [batch_size, num_control_actions]
         """
         probs = self.get_control_policy(meta_values, temperature)
+
+        # Check for NaN or Inf
+        if torch.isnan(probs).any() or torch.isinf(probs).any():
+            print(f"WARNING: NaN or Inf detected in control probabilities!")
+            print(f"  meta_values: {meta_values}")
+            print(f"  probs: {probs}")
+            # Replace with uniform distribution
+            probs = torch.ones_like(probs) / probs.shape[-1]
+
         dist = torch.distributions.Categorical(probs)
         action = dist.sample()
         log_prob = dist.log_prob(action)
@@ -287,8 +296,14 @@ class MetaControllerTrainer:
         # Compute returns
         returns = self.compute_returns(rewards)
 
-        # Normalize returns
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+        # Normalize returns (only if we have more than 1 sample)
+        if len(returns) > 1:
+            returns_std = returns.std()
+            if returns_std > 1e-8:
+                returns = (returns - returns.mean()) / returns_std
+            else:
+                returns = returns - returns.mean()
+        # If only 1 sample, no normalization needed
 
         # Recompute meta-values with current controller
         meta_values = self.controller(states, fast_entropies, kl_divergences, conflict_values)
@@ -306,6 +321,20 @@ class MetaControllerTrainer:
 
         # Total loss
         loss = policy_loss + self.entropy_coef * entropy_loss
+
+        # Check for NaN loss
+        if torch.isnan(loss):
+            print(f"WARNING: NaN loss detected in controller! Skipping update.")
+            print(f"  policy_loss: {policy_loss.item() if not torch.isnan(policy_loss) else 'NaN'}")
+            print(f"  entropy_loss: {entropy_loss.item() if not torch.isnan(entropy_loss) else 'NaN'}")
+            return {
+                'loss': float('nan'),
+                'policy_loss': policy_loss.item() if not torch.isnan(policy_loss) else float('nan'),
+                'entropy_loss': entropy_loss.item() if not torch.isnan(entropy_loss) else float('nan'),
+                'mean_entropy': 0.0,
+                'mean_return': 0.0,
+                'p_slow_mean': 0.5
+            }
 
         # Optimize
         self.optimizer.zero_grad()

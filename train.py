@@ -584,7 +584,7 @@ if __name__ == "__main__":
 
     # Stage 2: Train with slow and controller
     stage2_trainer = Stage2Trainer(env, agent, lr_slow=3e-4, lr_controller=1e-3)
-    stage2_metrics = stage2_trainer.train(num_episodes=1000, log_interval=50)
+    stage2_metrics = stage2_trainer.train(num_episodes=10000, log_interval=50)
 
     # Save final agent
     agent.save('checkpoints/agent_final.pt')
