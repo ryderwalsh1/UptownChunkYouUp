@@ -11,7 +11,7 @@ import torch
 
 
 class LambdaModulator:
-    def __init__(self, beta=2.0, w_long=0.8, w_short=0.2, lambda_min=0.1, lambda_max=0.99):
+    def __init__(self, beta=2.0, w_long=0.8, w_short=0.2, lambda_min=0.05, lambda_max=0.99):
         """
         Initialize lambda modulator.
 
@@ -78,10 +78,10 @@ class LambdaModulator:
                 p_slow = torch.tensor(p_slow, dtype=torch.float32)
 
             # Compute control demand (weighted combination)
-            d_t = self.w_long * conflict_map_value + self.w_short * p_slow
+            d_t = self.w_long * torch.sigmoid(conflict_map_value) + self.w_short * p_slow
 
             # sigmoid to ensure d_t is in [0, 1]
-            d_t = torch.sigmoid(d_t)
+            # d_t = torch.sigmoid(d_t)
 
             # Apply superlinear power-law mapping
             lambda_val = (1.0 - d_t) ** self.beta

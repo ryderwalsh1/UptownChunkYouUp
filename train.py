@@ -558,7 +558,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.01)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.5)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -568,7 +568,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.01
+        control_cost=0.5
     )
 
     print(f"Agent created")
@@ -584,7 +584,7 @@ if __name__ == "__main__":
 
     # Stage 2: Train with slow and controller
     stage2_trainer = Stage2Trainer(env, agent, lr_slow=3e-4, lr_controller=1e-3)
-    stage2_metrics = stage2_trainer.train(num_episodes=10000, log_interval=50)
+    stage2_metrics = stage2_trainer.train(num_episodes=5000, log_interval=50)
 
     # Save final agent
     agent.save('checkpoints/agent_final.pt')
