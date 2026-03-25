@@ -208,7 +208,7 @@ class FastNetwork(nn.Module):
 class FastNetworkTrainer:
     """Trainer for fast network using actor-critic with TD(λ)."""
 
-    def __init__(self, network, lr=3e-4, gamma=0.99, lambda_=0.95, entropy_coef=0.01, value_coef=0.5):
+    def __init__(self, network, lr=3e-4, gamma=0.99, lambda_=0.95, entropy_coef=0.01, value_coef=0.5, teacher_coef=1.0):
         """
         Initialize trainer.
 
@@ -226,6 +226,8 @@ class FastNetworkTrainer:
             Coefficient for entropy bonus
         value_coef : float
             Coefficient for value loss
+        teacher_coef : float
+            Coefficient for teacher forcing loss when slow memory is used
         """
         self.network = network
         self.optimizer = torch.optim.Adam(network.parameters(), lr=lr)
@@ -233,6 +235,7 @@ class FastNetworkTrainer:
         self.lambda_ = lambda_
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
+        self.teacher_coef = teacher_coef
 
     def compute_gae(self, rewards, values, dones, next_value, gamma=None, lambda_=None):
         """
@@ -316,6 +319,7 @@ class FastNetworkTrainer:
             - next_state: final next state encoding
             - next_goal: final next goal encoding
             - hiddens: list of hidden states
+            - used_slow: (optional) list of bool flags indicating if slow was used
 
         Returns:
         --------
@@ -329,6 +333,9 @@ class FastNetworkTrainer:
         dones = trajectory['dones']
         old_log_probs = torch.stack(trajectory['log_probs'])
         old_values = trajectory['values']
+
+        # Get slow usage flags if available (for teacher forcing)
+        used_slow = trajectory.get('used_slow', None)
 
         # Compute next value
         with torch.no_grad():
@@ -380,8 +387,20 @@ class FastNetworkTrainer:
         # Entropy bonus (encourage exploration)
         entropy_loss = -entropies.mean()
 
+        # Teacher forcing loss: when slow memory is used, supervise fast network to match slow action
+        teacher_loss = torch.tensor(0.0)
+        if used_slow is not None and any(used_slow):
+            # Create mask for steps where slow was used
+            slow_mask = torch.tensor(used_slow, dtype=torch.bool)
+            if slow_mask.any():
+                # Cross-entropy loss between fast logits and actual actions (from slow memory)
+                teacher_loss = F.cross_entropy(
+                    action_logits[slow_mask],
+                    actions[slow_mask]
+                )
+
         # Total loss
-        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss + self.teacher_coef * teacher_loss
 
         # Check for NaN loss
         if torch.isnan(loss):
@@ -389,11 +408,13 @@ class FastNetworkTrainer:
             print(f"  policy_loss: {policy_loss.item()}")
             print(f"  value_loss: {value_loss.item()}")
             print(f"  entropy_loss: {entropy_loss.item()}")
+            print(f"  teacher_loss: {teacher_loss.item()}")
             return {
                 'loss': float('nan'),
                 'policy_loss': policy_loss.item() if not torch.isnan(policy_loss) else float('nan'),
                 'value_loss': value_loss.item() if not torch.isnan(value_loss) else float('nan'),
                 'entropy_loss': entropy_loss.item() if not torch.isnan(entropy_loss) else float('nan'),
+                'teacher_loss': teacher_loss.item() if not torch.isnan(teacher_loss) else float('nan'),
                 'mean_entropy': 0.0,
                 'mean_value': 0.0
             }
@@ -409,6 +430,7 @@ class FastNetworkTrainer:
             'policy_loss': policy_loss.item(),
             'value_loss': value_loss.item(),
             'entropy_loss': entropy_loss.item(),
+            'teacher_loss': teacher_loss.item(),
             'mean_entropy': entropies.mean().item(),
             'mean_value': values.mean().item()
         }

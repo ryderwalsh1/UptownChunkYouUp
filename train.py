@@ -362,6 +362,9 @@ class Stage2Trainer:
 
         # Train fast network if it was used
         if len(trajectory['fast_states']) > 0:
+            # Extract used_slow flags from step_info
+            used_slow_flags = [info['used_slow'] for info in trajectory['step_info']]
+
             fast_traj = {
                 'states': trajectory['fast_states'],
                 'goals': trajectory['fast_goals'],
@@ -372,7 +375,8 @@ class Stage2Trainer:
                 'values': trajectory['fast_values'],
                 'next_state': trajectory['next_state'],
                 'next_goal': trajectory['next_goal'],
-                'hiddens': [None] * len(trajectory['fast_states'])
+                'hiddens': [None] * len(trajectory['fast_states']),
+                'used_slow': used_slow_flags  # Add teacher forcing information
             }
             fast_loss = self.fast_trainer.train_step(fast_traj)
             loss_dict['fast'] = fast_loss
@@ -865,7 +869,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.3)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.2)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -875,22 +879,22 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.3
+        control_cost=0.25
     )
 
     print(f"Agent created")
 
-    # Stage 1: Pretrain fast network
-    stage1_trainer = Stage1Trainer(env, agent, lr=3e-4)
-    stage1_metrics = stage1_trainer.train(num_episodes=500, log_interval=50)
+    # # Stage 1: Pretrain fast network
+    # stage1_trainer = Stage1Trainer(env, agent, lr=3e-4)
+    # stage1_metrics = stage1_trainer.train(num_episodes=500, log_interval=50)
 
-    # Save after stage 1
-    os.makedirs('checkpoints', exist_ok=True)
-    agent.save('checkpoints/agent_stage1.pt')
-    print("\nStage 1 checkpoint saved")
+    # # Save after stage 1
+    # os.makedirs('checkpoints', exist_ok=True)
+    # agent.save('checkpoints/agent_stage1.pt')
+    # print("\nStage 1 checkpoint saved")
 
-    # Plot Stage 1 results
-    plot_stage1_curves(stage1_metrics, save_path='stage1_training.png')
+    # # Plot Stage 1 results
+    # plot_stage1_curves(stage1_metrics, save_path='stage1_training.png')
 
     # Stage 2: Train with slow and controller
     stage2_trainer = Stage2Trainer(env, agent, lr_slow=3e-4, lr_controller=1e-3)
