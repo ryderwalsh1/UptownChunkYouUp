@@ -4,8 +4,8 @@ import warnings
 import pickle
 import gen_impgraph
 import networkx as nx
-from policy_network import PolicyNetwork
-from policy_network_pc import PolicyNetworkPC
+from fused_network import PolicyNetwork
+from fused_network_pc import PolicyNetworkPC
 import matplotlib.pyplot as plt
 import csv
 import os

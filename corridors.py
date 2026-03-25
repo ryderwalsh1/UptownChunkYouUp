@@ -277,7 +277,7 @@ class MazeGraph:
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
 
-        plt.show()
+        # plt.show()
 
     def get_graph(self):
         """Return the NetworkX graph object."""
@@ -308,7 +308,7 @@ if __name__ == "__main__":
     all_stats = []
 
     for corridor_val in corridor_vals:
-        maze = MazeGraph(length=50, width=50, corridor=corridor_val, seed=42)
+        maze = MazeGraph(length=12, width=12, corridor=corridor_val, seed=60)
         stats = maze.get_stats()
         all_stats.append(stats)
 
@@ -319,6 +319,7 @@ if __name__ == "__main__":
         print(f"  Nodes with 3+ connections (junctions): {stats['nodes_with_3plus_connections']}")
 
         maze.visualize(save_path=f'results/graphs/corridors/maze_corridor_{corridor_val:.1f}.png')
+        # maze.visualize()
 
     # Plot statistics across corridor values
     fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
@@ -349,4 +350,4 @@ if __name__ == "__main__":
         ax.set_facecolor('#F8F9FA')
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig('results/graphs/corridors/node_distribution_by_corridor.png', dpi=300, bbox_inches='tight', facecolor='white')

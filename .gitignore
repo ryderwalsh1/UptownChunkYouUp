@@ -17,3 +17,7 @@ results/
 
 # pnl
 pnl-show_graph-output/
+
+# legacy
+legacy/
+legacy/*

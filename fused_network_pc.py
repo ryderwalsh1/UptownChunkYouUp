@@ -781,32 +781,40 @@ class PolicyNetworkPC():
 
         return values
 
-    def chunkability_from_trajectory(self, path, target_literal, gamma=0.99, lambda_=0.0):
+    def chunkability_from_trajectory(self, path, target_literal, gamma=0.99, lambda_=0.0, lambda_exponent=2.5):
         """
-        Compute chunkability (corridor-likeness) of a trajectory.
+        Compute chunkability (corridor-likeness) of a trajectory using iterative context building.
 
         Uses the policy head's entropy to measure how deterministic the policy is.
         Chunkability = mean(1 / exp(H_t)) across trajectory steps.
+
+        This method builds context traces iteratively:
+        - At each step, compute chunkability so far
+        - Derive lambda from running average chunkability
+        - Use that lambda to update context for next step
 
         Args:
             path: list[int] - trajectory of literals
             target_literal: int - goal literal
             gamma: float - discount factor for context trace decay
-            lambda_: float - trace decay parameter (default 0.0 for no context)
+            lambda_: float - ignored (kept for backward compatibility, lambda is derived from chunkability)
+            lambda_exponent: float - exponent for lambda modulation (λ = chunkability^exponent)
 
         Returns:
-            float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
+            tuple: (chunkability, contexts)
+                chunkability: float - chunkability metric (1.0 = corridor-like, 0.0 = diffuse)
+                contexts: list[np.array] - context trace for each step in path
         """
         if len(path) <= 1:
-            return 0.0
+            return 0.0, [np.zeros(self.num_literals)]
 
-        entropies = []
+        chunkability_values = []
+        contexts = []
+        trace = np.zeros(self.num_literals)
+
         target_idx = self.literal_to_idx(target_literal)
         target_encoding = np.zeros(self.num_literals)
         target_encoding[target_idx] = 1.0
-
-        # Build context traces for the trajectory
-        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
 
         # Store current training state
         was_training = self.model.training
@@ -815,6 +823,9 @@ class PolicyNetworkPC():
         with torch.no_grad():
             # Compute entropy at each step (excluding the final state)
             for i in range(len(path) - 1):
+                # Store current context BEFORE updating
+                contexts.append(trace.copy())
+
                 source_idx = self.literal_to_idx(path[i])
                 source_encoding = np.zeros(self.num_literals)
                 source_encoding[source_idx] = 1.0
@@ -822,7 +833,7 @@ class PolicyNetworkPC():
                 # Convert to tensors
                 source_tensor = torch.from_numpy(np.array([source_encoding], dtype=np.float32)).to(self.device)
                 target_tensor = torch.from_numpy(np.array([target_encoding], dtype=np.float32)).to(self.device)
-                context_tensor = torch.from_numpy(np.array([contexts[i]], dtype=np.float32)).to(self.device)
+                context_tensor = torch.from_numpy(np.array([trace], dtype=np.float32)).to(self.device)
                 combined_tensor = torch.cat([source_tensor, target_tensor, context_tensor], dim=1)
 
                 # Get policy prediction
@@ -833,20 +844,36 @@ class PolicyNetworkPC():
                 prediction_np = prediction.cpu().detach().numpy().flatten()
                 non_zero_mask = prediction_np > 0
                 entropy = -np.sum(prediction_np[non_zero_mask] * np.log2(prediction_np[non_zero_mask]))
-                entropies.append(entropy)
+
+                # Compute instantaneous chunkability at this step
+                step_chunkability = 1.0 / np.exp(entropy)
+                chunkability_values.append(step_chunkability)
+
+                # Compute running average chunkability
+                running_avg_chunkability = np.mean(chunkability_values)
+
+                # Derive lambda from running average chunkability
+                step_lambda = running_avg_chunkability ** lambda_exponent
+
+                # Update context trace for next step using derived lambda
+                decay = gamma * step_lambda
+                idx = self.literal_to_idx(path[i])
+                trace = decay * trace
+                trace[idx] += 1.0
+
+            # Add final context (for terminal state)
+            contexts.append(trace.copy())
 
         # Restore previous training state
         if was_training:
             self.model.train()
 
-        if len(entropies) == 0:
-            return 0.0
+        if len(chunkability_values) == 0:
+            return 0.0, contexts
 
-        # Chunkability = mean(1 / exp(H_t))
-        effective_actions = [np.exp(h) for h in entropies]
-        chunkability_values = [1.0 / ea for ea in effective_actions]
-
-        return np.mean(chunkability_values)
+        # Return final running average chunkability and all contexts
+        final_chunkability = np.mean(chunkability_values)
+        return final_chunkability, contexts
 
     def update_value_single(self, source_encoding, target_encoding, value_target, context_encoding=None):
         """
@@ -973,14 +1000,14 @@ class PolicyNetworkPC():
             rewards = np.zeros(len(path))
             rewards[-1] = 1.0
 
-        # 1. Compute chunkability (using zero context, since we don't know lambda yet)
-        chunkability = self.chunkability_from_trajectory(path, target_literal, gamma=gamma, lambda_=0.0)
+        # 1. Compute chunkability and build context traces iteratively
+        # This computes chunkability while building proper context traces
+        chunkability, contexts = self.chunkability_from_trajectory(
+            path, target_literal, gamma=gamma, lambda_=0.0, lambda_exponent=lambda_exponent
+        )
 
-        # 2. Derive lambda from chunkability
+        # 2. Derive final lambda from chunkability
         lambda_ = chunkability ** lambda_exponent
-
-        # 3. Build context traces with the derived lambda
-        contexts = self.build_trajectory_contexts(path, gamma, lambda_)
 
         # 4. Train policy head with teacher-forced one-hot targets and context traces
         trajectory_sources, trajectory_targets, trajectory_answers = \
