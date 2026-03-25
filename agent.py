@@ -8,7 +8,7 @@ Implements the full cognitive control architecture with sample-based arbitration
 import torch
 import numpy as np
 from fast import FastNetwork
-from slow import SlowNetwork
+from slow import SlowMemory
 from controller import MetaController
 from conflict_map import ConflictMap, compute_kl_divergence
 from lambda_modulator import LambdaModulator
@@ -52,12 +52,12 @@ class CognitiveAgent:
 
         # Create networks
         self.fast_network = FastNetwork(num_nodes, num_actions, embedding_dim, hidden_dim)
-        self.slow_network = SlowNetwork(num_nodes, num_actions, embedding_dim, hidden_dim)
+        self.slow_memory = SlowMemory(num_nodes, num_actions)
         self.controller = MetaController(num_nodes, embedding_dim, hidden_dim)
 
-        # Initialize slow network memory if maze graph provided
+        # Initialize slow memory if maze graph provided
         if maze_graph is not None:
-            self.slow_network.initialize_memory(maze_graph)
+            self.slow_memory.initialize_memory(maze_graph)
 
         # Create conflict map
         self.conflict_map = ConflictMap(num_nodes, alpha=conflict_alpha)
@@ -116,11 +116,8 @@ class CognitiveAgent:
                 state_encoding, goal_encoding, self.fast_hidden
             )
 
-            # 2. Slow network forward pass (with episodic retrieval)
-            slow_logits, slow_value, retrieved_memory = self.slow_network(
-                state_encoding, goal_encoding
-            )
-
+            # 2. Slow memory query (pure retrieval, no network)
+            slow_logits = self.slow_memory.query(state_encoding, goal_encoding)
 
             # 3. Compute fast entropy
             fast_entropy = self.fast_network.compute_entropy(fast_logits)
@@ -153,12 +150,13 @@ class CognitiveAgent:
 
             if used_slow:
                 action_logits = slow_logits
-                value = slow_value
                 self.stats['slow_selected'] += 1
             else:
                 action_logits = fast_logits
-                value = fast_value
                 self.stats['fast_selected'] += 1
+
+            # Value always comes from fast network (slow memory doesn't estimate values)
+            value = fast_value
 
             # 10. Sample environment action from selected policy
             action, action_log_prob = self.fast_network.sample_action(action_logits)
@@ -180,11 +178,9 @@ class CognitiveAgent:
             'fast_logits': fast_logits,
             'slow_logits': slow_logits,
             'fast_value': fast_value,
-            'slow_value': slow_value,
             'fast_entropy': fast_entropy.item(),
             'kl_divergence': kl_divergence.item(),
             'conflict_value': conflict_value.item(),
-            'retrieved_memory': retrieved_memory,
             'state_idx': state_idx,
             'meta_values': meta_values,
             'control_probs': control_probs
@@ -256,7 +252,7 @@ class CognitiveAgent:
         """
         torch.save({
             'fast_network': self.fast_network.state_dict(),
-            'slow_network': self.slow_network.state_dict(),
+            # Note: slow_memory is not saved (it's re-initialized from maze graph)
             'controller': self.controller.state_dict(),
             'conflict_map': {
                 'conflict_values': self.conflict_map.conflict_values,
@@ -283,7 +279,7 @@ class CognitiveAgent:
         checkpoint = torch.load(filepath, weights_only=False)
 
         self.fast_network.load_state_dict(checkpoint['fast_network'])
-        self.slow_network.load_state_dict(checkpoint['slow_network'])
+        # Note: slow_memory is not loaded (it's re-initialized from maze graph)
         self.controller.load_state_dict(checkpoint['controller'])
 
         self.conflict_map.conflict_values = checkpoint['conflict_map']['conflict_values']
@@ -322,7 +318,7 @@ if __name__ == "__main__":
 
     print(f"Agent created with:")
     print(f"  Fast network: {sum(p.numel() for p in agent.fast_network.parameters())} params")
-    print(f"  Slow network: {sum(p.numel() for p in agent.slow_network.parameters())} params")
+    print(f"  Slow memory: episodic retrieval (no trainable params)")
     print(f"  Controller: {sum(p.numel() for p in agent.controller.parameters())} params")
 
     # Test single step

@@ -3,10 +3,12 @@ Training Script
 
 Two-stage training approach:
 1. Stage 1: Pretrain fast network alone
-2. Stage 2: Add slow network and meta-controller with RL
+2. Stage 2: Add slow memory and meta-controller with RL
 
 Implements TD(λ) with lambda-modulated eligibility traces and
 objective: reward + efficiency - control cost
+
+Note: Slow memory is NOT trained - it's pure episodic retrieval
 """
 
 import torch
@@ -18,7 +20,6 @@ import os
 from maze_env import MazeEnvironment
 from agent import CognitiveAgent
 from fast import FastNetworkTrainer
-from slow import SlowNetworkTrainer
 from controller import MetaControllerTrainer
 
 
@@ -221,8 +222,8 @@ class Stage2Trainer:
         self.lambda_init = lambda_init
 
         # Trainers for each component
+        # Note: No slow trainer - memory is not trained, only retrieved
         self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=3e-4, gamma=gamma)
-        self.slow_trainer = SlowNetworkTrainer(agent.slow_network, lr=lr_slow, gamma=gamma)
         self.controller_trainer = MetaControllerTrainer(agent.controller, lr=lr_controller, gamma=gamma)
 
     def collect_trajectory(self, max_steps=100, temperature=1.0):
@@ -255,16 +256,7 @@ class Stage2Trainer:
             'fast_dones': [],
             'fast_lambdas': [],
 
-            # For slow network
-            'slow_states': [],
-            'slow_goals': [],
-            'slow_memories': [],
-            'slow_actions': [],
-            'slow_log_probs': [],
-            'slow_values': [],
-            'slow_rewards': [],
-            'slow_dones': [],
-            'slow_lambdas': [],
+            # Note: No slow network trajectory - memory is not trained
 
             # For controller
             'control_states': [],
@@ -306,28 +298,19 @@ class Stage2Trainer:
             # Update conflict map
             self.agent.update_conflict_map(step_info['state_idx'], step_info['kl_divergence'])
 
-            # Store trajectory data based on which system was used
-            if step_info['used_slow']:
-                # Slow network was used
-                trajectory['slow_states'].append(state_encoding.squeeze(0))
-                trajectory['slow_goals'].append(goal_encoding.squeeze(0))
-                trajectory['slow_memories'].append(step_info['retrieved_memory'].squeeze(0))
-                trajectory['slow_actions'].append(step_info['action'])
-                trajectory['slow_log_probs'].append(step_info['action_log_prob'])
-                trajectory['slow_values'].append(step_info['slow_value'].squeeze())
-                trajectory['slow_rewards'].append(reward)
-                trajectory['slow_dones'].append(done)
-                trajectory['slow_lambdas'].append(lambda_val)
-            else:
-                # Fast network was used
-                trajectory['fast_states'].append(state_encoding.squeeze(0))
-                trajectory['fast_goals'].append(goal_encoding.squeeze(0))
-                trajectory['fast_actions'].append(step_info['action'])
-                trajectory['fast_log_probs'].append(step_info['action_log_prob'])
-                trajectory['fast_values'].append(step_info['fast_value'].squeeze())
-                trajectory['fast_rewards'].append(reward)
-                trajectory['fast_dones'].append(done)
-                trajectory['fast_lambdas'].append(lambda_val)
+            # Store trajectory data for fast network
+            # (Always store, regardless of whether fast or slow was used,
+            #  because we use fast_value for both branches)
+            trajectory['fast_states'].append(state_encoding.squeeze(0))
+            trajectory['fast_goals'].append(goal_encoding.squeeze(0))
+            trajectory['fast_actions'].append(step_info['action'])
+            trajectory['fast_log_probs'].append(step_info['action_log_prob'])
+            trajectory['fast_values'].append(step_info['fast_value'].squeeze())
+            trajectory['fast_rewards'].append(reward)
+            trajectory['fast_dones'].append(done)
+            trajectory['fast_lambdas'].append(lambda_val)
+
+            # Note: Slow memory trajectory not needed - it's not trained
 
             # Controller trajectory (always collected)
             trajectory['control_states'].append(state_encoding.squeeze(0))
@@ -362,7 +345,7 @@ class Stage2Trainer:
 
         trajectory['next_state'] = final_state_encoding
         trajectory['next_goal'] = final_goal_encoding
-        trajectory['next_memory'] = final_step_info['retrieved_memory'].squeeze(0)
+        # Note: No next_memory needed since slow memory is not trained
 
         return trajectory, episode_reward, len(trajectory['control_states']), success
 
@@ -394,22 +377,7 @@ class Stage2Trainer:
             fast_loss = self.fast_trainer.train_step(fast_traj)
             loss_dict['fast'] = fast_loss
 
-        # Train slow network if it was used
-        if len(trajectory['slow_states']) > 0:
-            slow_traj = {
-                'states': trajectory['slow_states'],
-                'goals': trajectory['slow_goals'],
-                'memories': trajectory['slow_memories'],
-                'actions': trajectory['slow_actions'],
-                'rewards': trajectory['slow_rewards'],
-                'dones': trajectory['slow_dones'],
-                'values': trajectory['slow_values'],
-                'next_state': trajectory['next_state'],
-                'next_goal': trajectory['next_goal'],
-                'next_memory': trajectory['next_memory']
-            }
-            slow_loss = self.slow_trainer.train_step(slow_traj)
-            loss_dict['slow'] = slow_loss
+        # Note: Slow memory is NOT trained - it's pure episodic retrieval
 
         # Train controller
         control_traj = {
