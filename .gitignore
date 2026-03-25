@@ -20,4 +20,6 @@ pnl-show_graph-output/
 
 # legacy
 legacy/
-legacy/*
+
+# checkpoints
+checkpoints/

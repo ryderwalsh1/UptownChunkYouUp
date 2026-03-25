@@ -1,6 +1,6 @@
 import numpy as np
 import psyneulink as pnl
-import gen_impgraph
+import legacy.gen_impgraph as gen_impgraph
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='psyneulink')
 

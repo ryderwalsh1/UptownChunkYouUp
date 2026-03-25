@@ -1,7 +1,7 @@
 import numpy as np
 import warnings
 import mlpcomposition as mlp
-import gen_impgraph
+import legacy.gen_impgraph as gen_impgraph
 import csv
 import os
 import matplotlib.pyplot as plt
