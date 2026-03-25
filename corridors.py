@@ -133,8 +133,7 @@ class MazeGraph:
             for node1, node2 in frontier:
                 if node2 not in visited:
                     conn_count = self._count_connections(node1)
-                    # Use corridor^8 for very dramatic effect - keeps 0.5 weak but 0.9+ very strong
-                    # corridor=0.5 -> 0.0039, corridor=0.8 -> 0.168, corridor=0.9 -> 0.43
+                    # Use corridor^12 for very dramatic effect - keeps 0.5 weak but 0.9+ very strong
                     corridor_factor = self.corridor*0.4 + 0.35
                     corridor_factor = corridor_factor ** 12
 
