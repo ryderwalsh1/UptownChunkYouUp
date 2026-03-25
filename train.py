@@ -52,7 +52,7 @@ class Stage1Trainer:
             lambda_=lambda_
         )
 
-    def collect_trajectory(self, max_steps=100):
+    def collect_trajectory(self, max_steps=50):
         """
         Collect trajectory using only fast network.
 
@@ -226,7 +226,7 @@ class Stage2Trainer:
         self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=3e-4, gamma=gamma)
         self.controller_trainer = MetaControllerTrainer(agent.controller, lr=lr_controller, gamma=gamma)
 
-    def collect_trajectory(self, max_steps=100, temperature=1.0):
+    def collect_trajectory(self, max_steps=50, temperature=1.0):
         """
         Collect trajectory using full agent (fast + slow + controller).
 
@@ -418,7 +418,13 @@ class Stage2Trainer:
             'episode_lengths': [],
             'success_rate': [],
             'p_slow': [],
+            'p_fast': [],
             'mean_lambda': [],
+            'lambda_values': [],  # Store all lambdas per episode for overlay plots
+            'mean_fast_entropy': [],
+            'mean_kl_divergence': [],
+            'used_slow_count': [],
+            'used_fast_count': [],
             'losses': []
         }
 
@@ -444,6 +450,7 @@ class Stage2Trainer:
             # Compute metrics
             step_infos = trajectory['step_info']
             mean_p_slow = np.mean([info['p_slow'] for info in step_infos])
+            mean_p_fast = 1.0 - mean_p_slow
 
             lambdas = []
             for info in step_infos:
@@ -451,12 +458,26 @@ class Stage2Trainer:
                 lambdas.append(lam)
             mean_lambda = np.mean(lambdas)
 
+            # Compute fast entropy and KL divergence
+            mean_fast_entropy = np.mean([info['fast_entropy'] for info in step_infos])
+            mean_kl_divergence = np.mean([info['kl_divergence'] for info in step_infos])
+
+            # Count actual fast/slow usage
+            used_slow_count = sum([1 for info in step_infos if info['used_slow']])
+            used_fast_count = len(step_infos) - used_slow_count
+
             # Log metrics
             metrics['episode_rewards'].append(episode_reward)
             metrics['episode_lengths'].append(episode_length)
             metrics['success_rate'].append(1.0 if success else 0.0)
             metrics['p_slow'].append(mean_p_slow)
+            metrics['p_fast'].append(mean_p_fast)
             metrics['mean_lambda'].append(mean_lambda)
+            metrics['lambda_values'].append(lambdas)  # Store all lambda values
+            metrics['mean_fast_entropy'].append(mean_fast_entropy)
+            metrics['mean_kl_divergence'].append(mean_kl_divergence)
+            metrics['used_slow_count'].append(used_slow_count)
+            metrics['used_fast_count'].append(used_fast_count)
             metrics['losses'].append(loss_dict)
 
             # Periodic logging
@@ -484,70 +505,356 @@ class Stage2Trainer:
         return metrics
 
 
-def plot_training_curves(stage1_metrics, stage2_metrics, save_path='training_curves.png'):
-    """Plot training curves."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+def plot_stage1_curves(stage1_metrics, save_path='stage1_training.png'):
+    """
+    Plot Stage 1 training curves (fast network pretraining).
 
-    # Stage 1 reward
-    ax = axes[0, 0]
+    Parameters:
+    -----------
+    stage1_metrics : dict
+        Stage 1 training metrics
+    save_path : str
+        Path to save the plot
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     window = 50
+
+    # Reward
+    ax = axes[0]
     rewards = stage1_metrics['episode_rewards']
-    smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
-    ax.plot(smoothed)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Reward')
-    ax.set_title('Stage 1: Fast Network Pretraining')
+    if len(rewards) > window:
+        smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
+        ax.plot(smoothed, color='#2E86AB', linewidth=2)
+    else:
+        ax.plot(rewards, color='#2E86AB', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=11)
+    ax.set_ylabel('Reward', fontsize=11)
+    ax.set_title('Stage 1: Episode Reward', fontsize=12, fontweight='bold')
     ax.grid(alpha=0.3)
 
-    # Stage 1 success rate
-    ax = axes[0, 1]
-    success = np.convolve(stage1_metrics['success_rate'], np.ones(window)/window, mode='valid')
-    ax.plot(success)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Success Rate')
-    ax.set_title('Stage 1: Success Rate')
+    # Success rate
+    ax = axes[1]
+    success = stage1_metrics['success_rate']
+    if len(success) > window:
+        smoothed = np.convolve(success, np.ones(window)/window, mode='valid')
+        ax.plot(smoothed, color='#06A77D', linewidth=2)
+    else:
+        ax.plot(success, color='#06A77D', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=11)
+    ax.set_ylabel('Success Rate', fontsize=11)
+    ax.set_title('Stage 1: Success Rate', fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
     ax.grid(alpha=0.3)
 
-    # Stage 1 length
-    ax = axes[0, 2]
-    lengths = np.convolve(stage1_metrics['episode_lengths'], np.ones(window)/window, mode='valid')
-    ax.plot(lengths)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Episode Length')
-    ax.set_title('Stage 1: Episode Length')
-    ax.grid(alpha=0.3)
-
-    # Stage 2 reward
-    ax = axes[1, 0]
-    rewards = stage2_metrics['episode_rewards']
-    smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
-    ax.plot(smoothed)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Reward')
-    ax.set_title('Stage 2: Full Agent Training')
-    ax.grid(alpha=0.3)
-
-    # Stage 2 p(slow)
-    ax = axes[1, 1]
-    p_slow = np.convolve(stage2_metrics['p_slow'], np.ones(window)/window, mode='valid')
-    ax.plot(p_slow)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('p(slow)')
-    ax.set_title('Stage 2: Slow Processing Usage')
-    ax.grid(alpha=0.3)
-
-    # Stage 2 lambda
-    ax = axes[1, 2]
-    lambdas = np.convolve(stage2_metrics['mean_lambda'], np.ones(window)/window, mode='valid')
-    ax.plot(lambdas)
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Lambda')
-    ax.set_title('Stage 2: Mean Lambda')
+    # Episode length
+    ax = axes[2]
+    lengths = stage1_metrics['episode_lengths']
+    if len(lengths) > window:
+        smoothed = np.convolve(lengths, np.ones(window)/window, mode='valid')
+        ax.plot(smoothed, color='#D741A7', linewidth=2)
+    else:
+        ax.plot(lengths, color='#D741A7', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=11)
+    ax.set_ylabel('Episode Length', fontsize=11)
+    ax.set_title('Stage 1: Episode Length', fontsize=12, fontweight='bold')
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"\nTraining curves saved to {save_path}")
+    plt.close()
+    print(f"Stage 1 training curves saved to {save_path}")
+
+
+def plot_stage2_curves(stage2_metrics, save_path='stage2_training.png'):
+    """
+    Plot comprehensive Stage 2 training curves with 3x3 grid.
+
+    Parameters:
+    -----------
+    stage2_metrics : dict
+        Stage 2 training metrics
+    save_path : str
+        Path to save the plot
+    """
+    fig, axes = plt.subplots(3, 3, figsize=(18, 14))
+    window = 50
+
+    # 1. Reward
+    ax = axes[0, 0]
+    rewards = stage2_metrics['episode_rewards']
+    episodes = np.arange(len(rewards))
+    if len(rewards) > window:
+        smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#2E86AB', linewidth=2, label='Smoothed')
+    else:
+        ax.plot(episodes, rewards, color='#2E86AB', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Reward', fontsize=10)
+    ax.set_title('Episode Reward', fontsize=11, fontweight='bold')
+    ax.grid(alpha=0.3)
+    if len(rewards) > window:
+        ax.legend(fontsize=9)
+
+    # 2. Success Rate
+    ax = axes[0, 1]
+    success = stage2_metrics['success_rate']
+    episodes = np.arange(len(success))
+    if len(success) > window:
+        smoothed = np.convolve(success, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#06A77D', linewidth=2, label='Smoothed')
+    else:
+        ax.plot(episodes, success, color='#06A77D', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Success Rate', fontsize=10)
+    ax.set_title('Success Rate', fontsize=11, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(alpha=0.3)
+    if len(success) > window:
+        ax.legend(fontsize=9)
+
+    # 3. Episode Length
+    ax = axes[0, 2]
+    lengths = stage2_metrics['episode_lengths']
+    episodes = np.arange(len(lengths))
+    if len(lengths) > window:
+        smoothed = np.convolve(lengths, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#D741A7', linewidth=2, label='Smoothed')
+    else:
+        ax.plot(episodes, lengths, color='#D741A7', linewidth=2)
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Episode Length', fontsize=10)
+    ax.set_title('Episode Length', fontsize=11, fontweight='bold')
+    ax.grid(alpha=0.3)
+    if len(lengths) > window:
+        ax.legend(fontsize=9)
+
+    # 4. Lambda (raw + smoothed overlay)
+    ax = axes[1, 0]
+    mean_lambda = stage2_metrics['mean_lambda']
+    episodes = np.arange(len(mean_lambda))
+    # Raw values
+    ax.plot(episodes, mean_lambda, color='#FFA630', alpha=0.3, linewidth=1, label='Raw')
+    # Smoothed
+    if len(mean_lambda) > window:
+        smoothed = np.convolve(mean_lambda, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#FFA630', linewidth=2, label='Smoothed')
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Lambda (λ)', fontsize=10)
+    ax.set_title('TD(λ) Parameter', fontsize=11, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+
+    # 5. Slow Processing Usage (raw + smoothed overlay)
+    ax = axes[1, 1]
+    p_slow = stage2_metrics['p_slow']
+    episodes = np.arange(len(p_slow))
+    # Raw values
+    ax.plot(episodes, p_slow, color='#E63946', alpha=0.3, linewidth=1, label='Raw p(slow)')
+    # Smoothed
+    if len(p_slow) > window:
+        smoothed = np.convolve(p_slow, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#E63946', linewidth=2, label='Smoothed p(slow)')
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('p(slow)', fontsize=10)
+    ax.set_title('Slow Processing Usage', fontsize=11, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+
+    # 6. Fast Processing Usage (raw + smoothed overlay)
+    ax = axes[1, 2]
+    p_fast = stage2_metrics['p_fast']
+    episodes = np.arange(len(p_fast))
+    # Raw values
+    ax.plot(episodes, p_fast, color='#457B9D', alpha=0.3, linewidth=1, label='Raw p(fast)')
+    # Smoothed
+    if len(p_fast) > window:
+        smoothed = np.convolve(p_fast, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#457B9D', linewidth=2, label='Smoothed p(fast)')
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('p(fast)', fontsize=10)
+    ax.set_title('Fast Processing Usage', fontsize=11, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+
+    # 7. Fast Entropy
+    ax = axes[2, 0]
+    fast_entropy = stage2_metrics['mean_fast_entropy']
+    episodes = np.arange(len(fast_entropy))
+    # Raw values
+    ax.plot(episodes, fast_entropy, color='#06A77D', alpha=0.3, linewidth=1, label='Raw')
+    # Smoothed
+    if len(fast_entropy) > window:
+        smoothed = np.convolve(fast_entropy, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#06A77D', linewidth=2, label='Smoothed')
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Entropy', fontsize=10)
+    ax.set_title('Fast Network Entropy', fontsize=11, fontweight='bold')
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+
+    # 8. Control Action Distribution (stacked area)
+    ax = axes[2, 1]
+    used_slow = np.array(stage2_metrics['used_slow_count'])
+    used_fast = np.array(stage2_metrics['used_fast_count'])
+    total = used_slow + used_fast
+    # Convert to proportions
+    prop_slow = used_slow / (total + 1e-10)
+    prop_fast = used_fast / (total + 1e-10)
+    episodes = np.arange(len(prop_slow))
+
+    # Smooth the proportions
+    if len(prop_slow) > window:
+        prop_slow_smooth = np.convolve(prop_slow, np.ones(window)/window, mode='valid')
+        prop_fast_smooth = np.convolve(prop_fast, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(prop_slow_smooth))
+        ax.fill_between(smoothed_episodes, 0, prop_fast_smooth, color='#457B9D', alpha=0.7, label='Fast')
+        ax.fill_between(smoothed_episodes, prop_fast_smooth, 1, color='#E63946', alpha=0.7, label='Slow')
+    else:
+        ax.fill_between(episodes, 0, prop_fast, color='#457B9D', alpha=0.7, label='Fast')
+        ax.fill_between(episodes, prop_fast, 1, color='#E63946', alpha=0.7, label='Slow')
+
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Proportion', fontsize=10)
+    ax.set_title('Actual Control Usage', fontsize=11, fontweight='bold')
+    ax.set_ylim([0, 1])
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9, loc='best')
+
+    # 9. KL Divergence
+    ax = axes[2, 2]
+    kl_div = stage2_metrics['mean_kl_divergence']
+    episodes = np.arange(len(kl_div))
+    # Raw values
+    ax.plot(episodes, kl_div, color='#A8DADC', alpha=0.3, linewidth=1, label='Raw')
+    # Smoothed
+    if len(kl_div) > window:
+        smoothed = np.convolve(kl_div, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
+        ax.plot(smoothed_episodes, smoothed, color='#1D3557', linewidth=2, label='Smoothed')
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('KL Divergence', fontsize=10)
+    ax.set_title('Fast-Slow KL Divergence', fontsize=11, fontweight='bold')
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+
+    plt.suptitle('Stage 2: Full Agent Training', fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Stage 2 training curves saved to {save_path}")
+
+
+def plot_conflict_map_heatmap(agent, maze, save_path='conflict_map_heatmap.png'):
+    """
+    Plot conflict map as a 2D heatmap overlaid on maze structure.
+
+    Parameters:
+    -----------
+    agent : CognitiveAgent
+        The trained agent with conflict map
+    maze : MazeGraph
+        The maze graph structure
+    save_path : str
+        Path to save the plot
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Get conflict values
+    conflict_values = agent.conflict_map.conflict_values
+
+    # Get maze dimensions and graph
+    length = maze.length
+    width = maze.width
+    graph = maze.get_graph()
+
+    # Create 2D grid for conflict values
+    conflict_grid = np.zeros((length, width))
+
+    # Map conflict values to grid positions
+    nodes_list = list(graph.nodes())
+    for idx, node in enumerate(nodes_list):
+        r, c = node
+        conflict_grid[r, c] = conflict_values[idx]
+
+    # Use log scale if values span large range
+    vmin = np.min(conflict_values[conflict_values > 0]) if np.any(conflict_values > 0) else 0
+    vmax = np.max(conflict_values)
+
+    # Check if log scale is appropriate
+    if vmax > 0 and vmin > 0 and (vmax / vmin > 100):
+        # Use log scale
+        conflict_grid_plot = np.log10(conflict_grid + 1e-10)
+        im = ax.imshow(conflict_grid_plot, cmap='hot', origin='upper', aspect='equal')
+        cbar = plt.colorbar(im, ax=ax, label='log10(Conflict Value)')
+    else:
+        # Use linear scale
+        im = ax.imshow(conflict_grid, cmap='hot', origin='upper', aspect='equal', vmin=0)
+        cbar = plt.colorbar(im, ax=ax, label='Conflict Value')
+
+    # Overlay maze structure (edges)
+    for edge in graph.edges():
+        node1, node2 = edge
+        r1, c1 = node1
+        r2, c2 = node2
+        # Draw line between nodes (swap x and y for imshow coordinates)
+        ax.plot([c1, c2], [r1, r2], color='cyan', linewidth=1.5, alpha=0.4, zorder=1)
+
+    # Mark nodes
+    for node in nodes_list:
+        r, c = node
+        ax.scatter(c, r, s=30, c='white', alpha=0.3, edgecolors='cyan', linewidths=0.5, zorder=2)
+
+    # Highlight high-conflict nodes (top 10%)
+    conflict_threshold = np.percentile(conflict_values, 90)
+    high_conflict_indices = np.where(conflict_values >= conflict_threshold)[0]
+
+    for idx in high_conflict_indices:
+        node = nodes_list[idx]
+        r, c = node
+        ax.scatter(c, r, s=120, marker='*', c='yellow', edgecolors='orange',
+                  linewidths=2, zorder=3, label='High Conflict' if idx == high_conflict_indices[0] else '')
+
+    # Labels and title
+    ax.set_xlabel('Column', fontsize=12)
+    ax.set_ylabel('Row', fontsize=12)
+    ax.set_title('Conflict Map Heatmap\n(Brighter = Higher Fast-Slow Disagreement)',
+                fontsize=13, fontweight='bold', pad=15)
+
+    # Add grid
+    ax.set_xticks(np.arange(width))
+    ax.set_yticks(np.arange(length))
+    ax.grid(False)
+
+    # Add legend
+    if len(high_conflict_indices) > 0:
+        ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+
+    # Add statistics text box
+    stats = agent.conflict_map.get_statistics()
+    textstr = '\n'.join([
+        f"Mean: {stats['mean_conflict']:.4f}",
+        f"Std: {stats['std_conflict']:.4f}",
+        f"Max: {stats['max_conflict']:.4f}",
+        f"Median: {stats['median_conflict']:.4f}",
+    ])
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=props)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Conflict map heatmap saved to {save_path}")
 
 
 if __name__ == "__main__":
@@ -558,7 +865,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.5)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.3)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -568,7 +875,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.5
+        control_cost=0.3
     )
 
     print(f"Agent created")
@@ -582,6 +889,9 @@ if __name__ == "__main__":
     agent.save('checkpoints/agent_stage1.pt')
     print("\nStage 1 checkpoint saved")
 
+    # Plot Stage 1 results
+    plot_stage1_curves(stage1_metrics, save_path='stage1_training.png')
+
     # Stage 2: Train with slow and controller
     stage2_trainer = Stage2Trainer(env, agent, lr_slow=3e-4, lr_controller=1e-3)
     stage2_metrics = stage2_trainer.train(num_episodes=5000, log_interval=50)
@@ -590,8 +900,11 @@ if __name__ == "__main__":
     agent.save('checkpoints/agent_final.pt')
     print("\nFinal checkpoint saved")
 
-    # Plot training curves
-    plot_training_curves(stage1_metrics, stage2_metrics, save_path='training_curves.png')
+    # Plot Stage 2 results
+    plot_stage2_curves(stage2_metrics, save_path='stage2_training.png')
+
+    # Plot conflict map heatmap
+    plot_conflict_map_heatmap(agent, maze, save_path='conflict_map_heatmap.png')
 
     # Print final statistics
     print("\n" + "=" * 70)
