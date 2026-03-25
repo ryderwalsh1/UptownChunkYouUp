@@ -44,7 +44,7 @@ class MazeEnvironment:
         self.idx_to_node = {idx: node for node, idx in self.node_to_idx.items()}
 
         self.num_nodes = len(self.nodes_list)
-        self.num_actions = 4  # up, down, left, right
+        self.num_actions = self.num_nodes  # Actions are node indices (allows teleportation)
 
         # State variables
         self.current_pos = None
@@ -124,41 +124,6 @@ class MazeEnvironment:
             'step_count': self.step_count
         }
 
-    def _action_to_direction(self, action):
-        """
-        Convert action index to direction delta.
-
-        Actions:
-        0 = up (-1, 0)
-        1 = down (+1, 0)
-        2 = left (0, -1)
-        3 = right (0, +1)
-        """
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        return directions[action]
-
-    def _get_valid_actions(self, pos):
-        """
-        Get list of valid actions from given position.
-
-        Returns:
-        --------
-        valid_actions : list of int
-            List of valid action indices
-        """
-        valid_actions = []
-        neighbors = list(self.graph.neighbors(pos))
-
-        for action in range(self.num_actions):
-            dr, dc = self._action_to_direction(action)
-            r, c = pos
-            next_pos = (r + dr, c + dc)
-
-            if next_pos in neighbors:
-                valid_actions.append(action)
-
-        return valid_actions
-
     def step(self, action, used_slow=False):
         """
         Take a step in the environment.
@@ -166,7 +131,7 @@ class MazeEnvironment:
         Parameters:
         -----------
         action : int
-            Action to take (0-3)
+            Action (node index to move to - allows teleportation)
         used_slow : bool
             Whether slow processing was used (for control cost)
 
@@ -181,20 +146,13 @@ class MazeEnvironment:
         info : dict
             Additional information
         """
-        # Get direction delta
-        dr, dc = self._action_to_direction(action)
-        r, c = self.current_pos
-        next_pos = (r + dr, c + dc)
-
-        # Check if action is valid (there's an edge)
-        valid_actions = self._get_valid_actions(self.current_pos)
-
-        if action in valid_actions:
-            # Valid move
-            self.current_pos = next_pos
+        # Action is directly the node index to move to
+        # Networks can "teleport" to any node
+        if 0 <= action < self.num_nodes:
+            self.current_pos = self.idx_to_node[action]
             invalid_move = False
         else:
-            # Invalid move - stay in place
+            # Invalid action index - stay in place
             invalid_move = True
 
         self.step_count += 1
@@ -255,7 +213,7 @@ class MazeEnvironment:
 
     def get_optimal_next_action(self, pos=None, goal=None):
         """
-        Get optimal next action from pos toward goal using shortest path.
+        Get optimal next action (node index) from pos toward goal using shortest path.
 
         Returns None if no path exists or already at goal.
         """
@@ -276,18 +234,8 @@ class MazeEnvironment:
 
         next_pos = path[1]
 
-        # Convert next_pos to action
-        dr = next_pos[0] - pos[0]
-        dc = next_pos[1] - pos[1]
-
-        direction_to_action = {
-            (-1, 0): 0,  # up
-            (1, 0): 1,   # down
-            (0, -1): 2,  # left
-            (0, 1): 3    # right
-        }
-
-        return direction_to_action.get((dr, dc), None)
+        # Action is directly the node index
+        return self.node_to_idx[next_pos]
 
     def render(self, title=None):
         """

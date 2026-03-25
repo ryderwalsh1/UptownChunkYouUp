@@ -387,7 +387,7 @@ if __name__ == "__main__":
     print("Testing Fast Network...")
 
     num_nodes = 64
-    num_actions = 4
+    num_actions = num_nodes  # Actions are node indices
     batch_size = 8
 
     # Create network

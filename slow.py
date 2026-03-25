@@ -388,7 +388,7 @@ if __name__ == "__main__":
     maze = MazeGraph(length=4, width=4, corridor=0.5, seed=42)
     graph = maze.get_graph()
     num_nodes = graph.number_of_nodes()
-    num_actions = 4
+    num_actions = num_nodes  # Actions are node indices
 
     print(f"Maze has {num_nodes} nodes")
 
