@@ -1,23 +1,19 @@
 """
 Slow Memory System
 
-Pure episodic memory retrieval using PsyNeuLink.
-NOT a neural network - just memory lookup.
+Pure dictionary-based memory lookup - no PsyNeuLink.
+Fast and simple associative memory for (state, goal) -> action.
 """
 
 import torch
 import numpy as np
-import psyneulink as pnl
 import networkx as nx
-import warnings
-
-warnings.filterwarnings("ignore", category=UserWarning, module='psyneulink')
 
 
 class SlowMemory:
-    """Simple episodic memory system for action retrieval."""
+    """Simple dictionary-based episodic memory for action retrieval."""
 
-    def __init__(self, num_nodes, num_actions, memory_softmax_gain=15.0, memory_field_weights=None):
+    def __init__(self, num_nodes, num_actions, default_temperature=1.0):
         """
         Initialize slow memory system.
 
@@ -27,22 +23,19 @@ class SlowMemory:
             Number of nodes in the maze (state space size)
         num_actions : int
             Number of possible actions (should equal num_nodes)
-        memory_softmax_gain : float
-            Softmax gain for episodic memory retrieval
-        memory_field_weights : list, optional
-            Weights for memory fields [source, target, answer]
+        default_temperature : float
+            Temperature for softmax when creating distributions
         """
         self.num_nodes = num_nodes
         self.num_actions = num_actions
-        self.memory_softmax_gain = memory_softmax_gain
-        self.memory_field_weights = memory_field_weights or [1.0, 1.0, None]
+        self.default_temperature = default_temperature
 
-        # Episodic memory (PsyNeuLink EMComposition)
-        self.episodic_memory = None
+        # Memory storage: dict mapping (state_idx, goal_idx) -> action_idx
+        self.memory = {}
 
     def initialize_memory(self, maze_graph):
         """
-        Initialize episodic memory with shortest path information from maze.
+        Initialize memory with shortest path information from maze.
 
         Parameters:
         -----------
@@ -53,7 +46,7 @@ class SlowMemory:
         nodes_list = list(maze_graph.nodes())
         node_to_idx = {node: idx for idx, node in enumerate(nodes_list)}
 
-        memories = []
+        memory_count = 0
         for source in nodes_list:
             for target in nodes_list:
                 if source != target and nx.has_path(maze_graph, source, target):
@@ -61,48 +54,22 @@ class SlowMemory:
                     if len(path) > 1:
                         next_step = path[1]  # The immediate next node
 
-                        # Create one-hot encodings
-                        source_encoding = [0] * self.num_nodes
-                        source_encoding[node_to_idx[source]] = 1
+                        # Store mapping: (source_idx, target_idx) -> next_step_idx
+                        source_idx = node_to_idx[source]
+                        target_idx = node_to_idx[target]
+                        next_step_idx = node_to_idx[next_step]
 
-                        target_encoding = [0] * self.num_nodes
-                        target_encoding[node_to_idx[target]] = 1
+                        self.memory[(source_idx, target_idx)] = next_step_idx
+                        memory_count += 1
 
-                        # Answer is the next node (action = next node index)
-                        next_step_encoding = [0] * self.num_actions
-                        next_step_encoding[node_to_idx[next_step]] = 1
-
-                        memories.append({
-                            'Source': source_encoding,
-                            'Target': target_encoding,
-                            'Answer': next_step_encoding
-                        })
-
-        if len(memories) == 0:
+        if memory_count == 0:
             raise ValueError("No memories created from maze graph")
 
-        memory_capacity = len(memories)
-        memory_array = np.array([[m['Source'], m['Target'], m['Answer']] for m in memories])
+        print(f"Initialized episodic memory with {memory_count} navigation memories")
 
-        # Create EMComposition
-        self.episodic_memory = pnl.EMComposition(
-            memory_template=memory_array,
-            memory_capacity=memory_capacity,
-            field_names=['Source', 'Target', 'Answer'],
-            field_weights=self.memory_field_weights,
-            storage_prob=0.0,  # Don't store new memories during queries
-            memory_decay_rate=0.0,
-            softmax_gain=self.memory_softmax_gain,
-            normalize_memories=True,
-            enable_learning=False,
-            name='Slow_Memory'
-        )
-
-        print(f"Initialized episodic memory with {len(memories)} navigation memories")
-
-    def query(self, state_encoding, goal_encoding):
+    def query(self, state_encoding, goal_encoding, temperature=None):
         """
-        Query episodic memory for action given current state and goal.
+        Query memory for action given current state and goal.
 
         Parameters:
         -----------
@@ -110,37 +77,45 @@ class SlowMemory:
             One-hot encoding of current state [batch_size, num_nodes]
         goal_encoding : torch.Tensor
             One-hot encoding of goal state [batch_size, num_nodes]
+        temperature : float, optional
+            Temperature for softmax (higher = more uniform, lower = sharper)
 
         Returns:
         --------
         action_logits : torch.Tensor
             Action distribution from memory [batch_size, num_actions]
         """
-        if self.episodic_memory is None:
-            raise ValueError("Episodic memory not initialized. Call initialize_memory() first.")
+        if temperature is None:
+            temperature = self.default_temperature
 
         batch_size = state_encoding.shape[0]
         action_logits_list = []
 
         for i in range(batch_size):
-            # Convert to numpy for PsyNeuLink
-            state_np = state_encoding[i].detach().cpu().numpy()
-            goal_np = goal_encoding[i].detach().cpu().numpy()
+            # Get state and goal indices from one-hot encodings
+            state_idx = state_encoding[i].argmax().item()
+            goal_idx = goal_encoding[i].argmax().item()
 
-            # Query the episodic memory
-            query_inputs = {
-                self.episodic_memory.query_input_nodes[0]: state_np.tolist(),
-                self.episodic_memory.query_input_nodes[1]: goal_np.tolist()
-            }
+            # Look up action in memory
+            if (state_idx, goal_idx) in self.memory:
+                next_step_idx = self.memory[(state_idx, goal_idx)]
 
-            results = self.episodic_memory.run(inputs=query_inputs)
+                # Create sharp distribution centered on the retrieved action
+                # Use high logit for the correct action, low for others
+                logits = torch.full((self.num_actions,), -10.0)
+                logits[next_step_idx] = 10.0
 
-            # Extract the retrieved action distribution (Answer field)
-            action_dist = np.array(results[2], dtype=np.float32)  # [num_actions]
-            action_logits_list.append(action_dist)
+                # Apply temperature
+                logits = logits / temperature
 
-        # Convert to torch tensor
-        action_logits = torch.tensor(np.array(action_logits_list), dtype=torch.float32)
+            else:
+                # If not in memory (shouldn't happen with complete graph), use uniform
+                logits = torch.zeros(self.num_actions)
+
+            action_logits_list.append(logits)
+
+        # Stack into batch
+        action_logits = torch.stack(action_logits_list)
 
         return action_logits
 
@@ -164,8 +139,9 @@ if __name__ == "__main__":
     print(f"\nCreated SlowMemory")
 
     # Initialize memory
-    print("\nInitializing episodic memory...")
+    print("\nInitializing memory...")
     memory.initialize_memory(graph)
+    print(f"Memory contains {len(memory.memory)} entries")
 
     # Test query
     print("\nTesting memory query...")
@@ -179,16 +155,18 @@ if __name__ == "__main__":
 
     action_logits = memory.query(state_encoding, goal_encoding)
     print(f"  Action logits shape: {action_logits.shape}")
-    print(f"  Action logits (first sample): {action_logits[0]}")
     print(f"  Suggested action (argmax): {action_logits[0].argmax().item()}")
 
-    # Test that retrieved actions make sense
+    # Test that retrieved actions are correct
     print("\nTesting multiple queries...")
     nodes_list = list(graph.nodes())
     node_to_idx = {node: idx for idx, node in enumerate(nodes_list)}
 
-    for i in range(min(3, num_nodes)):
-        for j in range(min(3, num_nodes)):
+    correct = 0
+    total = 0
+
+    for i in range(min(5, num_nodes)):
+        for j in range(min(5, num_nodes)):
             if i != j and nx.has_path(graph, nodes_list[i], nodes_list[j]):
                 state = torch.zeros(1, num_nodes)
                 state[0, i] = 1.0
@@ -204,7 +182,29 @@ if __name__ == "__main__":
                 path = nx.shortest_path(graph, nodes_list[i], nodes_list[j])
                 optimal_next = path[1] if len(path) > 1 else nodes_list[j]
 
-                match = "✓" if suggested_node == optimal_next else "✗"
-                print(f"  {match} From {nodes_list[i]} to {nodes_list[j]}: suggested {suggested_node}, optimal {optimal_next}")
+                match = suggested_node == optimal_next
+                total += 1
+                if match:
+                    correct += 1
+
+                symbol = "✓" if match else "✗"
+                print(f"  {symbol} From {nodes_list[i]} to {nodes_list[j]}: "
+                      f"suggested {suggested_node}, optimal {optimal_next}")
+
+    print(f"\nAccuracy: {correct}/{total} ({100*correct/total:.1f}%)")
+
+    # Test batch query
+    print("\nTesting batch query...")
+    batch_states = torch.zeros(3, num_nodes)
+    batch_states[0, 0] = 1.0
+    batch_states[1, 1] = 1.0
+    batch_states[2, 2] = 1.0
+
+    batch_goals = torch.zeros(3, num_nodes)
+    batch_goals[:, num_nodes-1] = 1.0
+
+    batch_logits = memory.query(batch_states, batch_goals)
+    print(f"  Batch logits shape: {batch_logits.shape}")
+    print(f"  Suggested actions: {batch_logits.argmax(dim=1).tolist()}")
 
     print("\n✓ Slow memory tests passed!")
