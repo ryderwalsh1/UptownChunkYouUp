@@ -429,6 +429,8 @@ class Stage2Trainer:
             'mean_kl_divergence': [],
             'used_slow_count': [],
             'used_fast_count': [],
+            'mean_q_fast': [],  # Mean Q-value for fast control action
+            'mean_q_slow': [],  # Mean Q-value for slow control action
             'losses': []
         }
 
@@ -470,6 +472,10 @@ class Stage2Trainer:
             used_slow_count = sum([1 for info in step_infos if info['used_slow']])
             used_fast_count = len(step_infos) - used_slow_count
 
+            # Compute mean Q-values for controller
+            mean_q_fast = np.mean([info['meta_values'][0, 0].item() for info in step_infos])
+            mean_q_slow = np.mean([info['meta_values'][0, 1].item() for info in step_infos])
+
             # Log metrics
             metrics['episode_rewards'].append(episode_reward)
             metrics['episode_lengths'].append(episode_length)
@@ -482,6 +488,8 @@ class Stage2Trainer:
             metrics['mean_kl_divergence'].append(mean_kl_divergence)
             metrics['used_slow_count'].append(used_slow_count)
             metrics['used_fast_count'].append(used_fast_count)
+            metrics['mean_q_fast'].append(mean_q_fast)
+            metrics['mean_q_slow'].append(mean_q_slow)
             metrics['losses'].append(loss_dict)
 
             # Periodic logging
@@ -653,39 +661,50 @@ def plot_stage2_curves(stage2_metrics, save_path='stage2_training.png'):
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
 
-    # 5. Slow Processing Usage (raw + smoothed overlay)
+    # 5. p(slow) and p(fast) overlaid (raw + smoothed)
     ax = axes[1, 1]
     p_slow = stage2_metrics['p_slow']
+    p_fast = stage2_metrics['p_fast']
     episodes = np.arange(len(p_slow))
-    # Raw values
-    ax.plot(episodes, p_slow, color='#E63946', alpha=0.3, linewidth=1, label='Raw p(slow)')
-    # Smoothed
+
+    # Smoothed values
     if len(p_slow) > window:
-        smoothed = np.convolve(p_slow, np.ones(window)/window, mode='valid')
-        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
-        ax.plot(smoothed_episodes, smoothed, color='#E63946', linewidth=2, label='Smoothed p(slow)')
+        p_slow_smoothed = np.convolve(p_slow, np.ones(window)/window, mode='valid')
+        p_fast_smoothed = np.convolve(p_fast, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(p_slow_smoothed))
+        ax.plot(smoothed_episodes, p_slow_smoothed, color='#E63946', linewidth=2, label='p(slow)')
+        ax.plot(smoothed_episodes, p_fast_smoothed, color='#457B9D', linewidth=2, label='p(fast)')
+    else:
+        ax.plot(episodes, p_slow, color='#E63946', linewidth=2, label='p(slow)')
+        ax.plot(episodes, p_fast, color='#457B9D', linewidth=2, label='p(fast)')
+
     ax.set_xlabel('Episode', fontsize=10)
-    ax.set_ylabel('p(slow)', fontsize=10)
-    ax.set_title('Slow Processing Usage', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Probability', fontsize=10)
+    ax.set_title('Policy Selection Probabilities', fontsize=11, fontweight='bold')
     ax.set_ylim([0, 1.05])
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
 
-    # 6. Fast Processing Usage (raw + smoothed overlay)
+    # 6. Controller Q-Values overlaid (raw + smoothed)
     ax = axes[1, 2]
-    p_fast = stage2_metrics['p_fast']
-    episodes = np.arange(len(p_fast))
-    # Raw values
-    ax.plot(episodes, p_fast, color='#457B9D', alpha=0.3, linewidth=1, label='Raw p(fast)')
-    # Smoothed
-    if len(p_fast) > window:
-        smoothed = np.convolve(p_fast, np.ones(window)/window, mode='valid')
-        smoothed_episodes = np.arange(window//2, window//2 + len(smoothed))
-        ax.plot(smoothed_episodes, smoothed, color='#457B9D', linewidth=2, label='Smoothed p(fast)')
+    q_fast = stage2_metrics['mean_q_fast']
+    q_slow = stage2_metrics['mean_q_slow']
+    episodes = np.arange(len(q_fast))
+
+    # Smoothed values
+    if len(q_fast) > window:
+        q_fast_smoothed = np.convolve(q_fast, np.ones(window)/window, mode='valid')
+        q_slow_smoothed = np.convolve(q_slow, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(q_fast_smoothed))
+        ax.plot(smoothed_episodes, q_fast_smoothed, color='#457B9D', linewidth=2, label='Q(fast)')
+        ax.plot(smoothed_episodes, q_slow_smoothed, color='#E63946', linewidth=2, label='Q(slow)')
+    else:
+        ax.plot(episodes, q_fast, color='#457B9D', linewidth=2, label='Q(fast)')
+        ax.plot(episodes, q_slow, color='#E63946', linewidth=2, label='Q(slow)')
+
     ax.set_xlabel('Episode', fontsize=10)
-    ax.set_ylabel('p(fast)', fontsize=10)
-    ax.set_title('Fast Processing Usage', fontsize=11, fontweight='bold')
-    ax.set_ylim([0, 1.05])
+    ax.set_ylabel('Q-Value', fontsize=10)
+    ax.set_title('Controller Q-Values', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
 
@@ -869,7 +888,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.2)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.4)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -879,7 +898,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.25
+        control_cost=0.4
     )
 
     print(f"Agent created")
