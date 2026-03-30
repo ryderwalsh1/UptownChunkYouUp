@@ -13,7 +13,7 @@ import networkx as nx
 class SlowMemory:
     """Simple dictionary-based episodic memory for action retrieval."""
 
-    def __init__(self, num_nodes, num_actions, default_temperature=1.0):
+    def __init__(self, num_nodes, num_actions=5, default_temperature=1.0):
         """
         Initialize slow memory system.
 
@@ -22,15 +22,16 @@ class SlowMemory:
         num_nodes : int
             Number of nodes in the maze (state space size)
         num_actions : int
-            Number of possible actions (should equal num_nodes)
+            Number of possible actions (5: UP, DOWN, LEFT, RIGHT, IDENTIFY_GOAL)
         default_temperature : float
             Temperature for softmax when creating distributions
         """
         self.num_nodes = num_nodes
-        self.num_actions = num_actions
+        self.num_actions = num_actions  # Should be 5
         self.default_temperature = default_temperature
 
-        # Memory storage: dict mapping (state_idx, goal_idx) -> action_idx
+        # Memory storage: dict mapping (state_idx, goal_idx) -> direction (0-4)
+        # 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
         self.memory = {}
 
     def initialize_memory(self, maze_graph):
@@ -39,27 +40,73 @@ class SlowMemory:
 
         Parameters:
         -----------
-        maze_graph : networkx.Graph
-            The maze graph
+        maze_graph : networkx.Graph or MazeGraph
+            The maze graph (either NetworkX graph or MazeGraph object)
         """
-        # Build shortest path memories - store (source, target) -> next_node
-        nodes_list = list(maze_graph.nodes())
+        # Handle both MazeGraph and raw NetworkX graph
+        if hasattr(maze_graph, 'get_graph'):
+            # It's a MazeGraph object
+            from corridors import MazeGraph
+            maze = maze_graph
+            graph = maze.get_graph()
+        else:
+            # It's a raw NetworkX graph - need to create MazeGraph wrapper
+            # This shouldn't happen in normal use, but handle it gracefully
+            graph = maze_graph
+            maze = None
+
+        # Build shortest path memories - store (source, target) -> direction
+        nodes_list = list(graph.nodes())
         node_to_idx = {node: idx for idx, node in enumerate(nodes_list)}
+
+        # Direction constants
+        DIRECTION_UP = 0
+        DIRECTION_DOWN = 1
+        DIRECTION_LEFT = 2
+        DIRECTION_RIGHT = 3
+        IDENTIFY_GOAL = 4
 
         memory_count = 0
         for source in nodes_list:
             for target in nodes_list:
-                if source != target and nx.has_path(maze_graph, source, target):
-                    path = nx.shortest_path(maze_graph, source, target)
+                if source == target:
+                    # If at goal, action is IDENTIFY_GOAL
+                    source_idx = node_to_idx[source]
+                    target_idx = node_to_idx[target]
+                    self.memory[(source_idx, target_idx)] = IDENTIFY_GOAL
+                    memory_count += 1
+
+                elif nx.has_path(graph, source, target):
+                    path = nx.shortest_path(graph, source, target)
                     if len(path) > 1:
                         next_step = path[1]  # The immediate next node
 
-                        # Store mapping: (source_idx, target_idx) -> next_step_idx
+                        # Convert to direction
+                        r_src, c_src = source
+                        r_next, c_next = next_step
+
+                        dr = r_next - r_src
+                        dc = c_next - c_src
+
+                        # Map to direction
+                        if dr == -1 and dc == 0:
+                            direction = DIRECTION_UP
+                        elif dr == 1 and dc == 0:
+                            direction = DIRECTION_DOWN
+                        elif dr == 0 and dc == -1:
+                            direction = DIRECTION_LEFT
+                        elif dr == 0 and dc == 1:
+                            direction = DIRECTION_RIGHT
+                        else:
+                            # Should not happen
+                            print(f"Warning: Invalid direction from {source} to {next_step}")
+                            continue
+
+                        # Store mapping: (source_idx, target_idx) -> direction
                         source_idx = node_to_idx[source]
                         target_idx = node_to_idx[target]
-                        next_step_idx = node_to_idx[next_step]
 
-                        self.memory[(source_idx, target_idx)] = next_step_idx
+                        self.memory[(source_idx, target_idx)] = direction
                         memory_count += 1
 
         if memory_count == 0:
@@ -83,7 +130,8 @@ class SlowMemory:
         Returns:
         --------
         action_logits : torch.Tensor
-            Action distribution from memory [batch_size, num_actions]
+            Action distribution from memory [batch_size, 5]
+            Actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
         """
         if temperature is None:
             temperature = self.default_temperature
@@ -96,20 +144,20 @@ class SlowMemory:
             state_idx = state_encoding[i].argmax().item()
             goal_idx = goal_encoding[i].argmax().item()
 
-            # Look up action in memory
+            # Look up direction in memory
             if (state_idx, goal_idx) in self.memory:
-                next_step_idx = self.memory[(state_idx, goal_idx)]
+                direction = self.memory[(state_idx, goal_idx)]
 
-                # Create sharp distribution centered on the retrieved action
-                # Use high logit for the correct action, low for others
+                # Create sharp distribution centered on the retrieved direction
+                # Use high logit for the correct direction, low for others
                 logits = torch.full((self.num_actions,), -10.0)
-                logits[next_step_idx] = 10.0
+                logits[direction] = 10.0
 
                 # Apply temperature
                 logits = logits / temperature
 
             else:
-                # If not in memory (shouldn't happen with complete graph), use uniform
+                # If not in memory (shouldn't happen with complete initialization), use uniform
                 logits = torch.zeros(self.num_actions)
 
             action_logits_list.append(logits)
@@ -130,7 +178,7 @@ if __name__ == "__main__":
     maze = MazeGraph(length=4, width=4, corridor=0.5, seed=42)
     graph = maze.get_graph()
     num_nodes = graph.number_of_nodes()
-    num_actions = num_nodes  # Actions are node indices
+    num_actions = 5  # Direction-based actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
 
     print(f"Maze has {num_nodes} nodes")
 
@@ -138,14 +186,15 @@ if __name__ == "__main__":
     memory = SlowMemory(num_nodes, num_actions)
     print(f"\nCreated SlowMemory")
 
-    # Initialize memory
+    # Initialize memory with MazeGraph object
     print("\nInitializing memory...")
-    memory.initialize_memory(graph)
+    memory.initialize_memory(maze)
     print(f"Memory contains {len(memory.memory)} entries")
 
     # Test query
     print("\nTesting memory query...")
     batch_size = 4
+    action_names = {0: 'UP', 1: 'DOWN', 2: 'LEFT', 3: 'RIGHT', 4: 'IDENTIFY_GOAL'}
 
     state_encoding = torch.zeros(batch_size, num_nodes)
     state_encoding[:, 0] = 1.0  # First node
@@ -155,41 +204,68 @@ if __name__ == "__main__":
 
     action_logits = memory.query(state_encoding, goal_encoding)
     print(f"  Action logits shape: {action_logits.shape}")
-    print(f"  Suggested action (argmax): {action_logits[0].argmax().item()}")
+    suggested_direction = action_logits[0].argmax().item()
+    print(f"  Suggested direction: {action_names[suggested_direction]} ({suggested_direction})")
 
     # Test that retrieved actions are correct
     print("\nTesting multiple queries...")
     nodes_list = list(graph.nodes())
-    node_to_idx = {node: idx for idx, node in enumerate(nodes_list)}
 
     correct = 0
     total = 0
 
     for i in range(min(5, num_nodes)):
         for j in range(min(5, num_nodes)):
-            if i != j and nx.has_path(graph, nodes_list[i], nodes_list[j]):
-                state = torch.zeros(1, num_nodes)
-                state[0, i] = 1.0
+            state = torch.zeros(1, num_nodes)
+            state[0, i] = 1.0
 
-                goal = torch.zeros(1, num_nodes)
-                goal[0, j] = 1.0
+            goal = torch.zeros(1, num_nodes)
+            goal[0, j] = 1.0
 
-                logits = memory.query(state, goal)
-                suggested_action = logits.argmax().item()
-                suggested_node = nodes_list[suggested_action]
+            logits = memory.query(state, goal)
+            suggested_direction = logits.argmax().item()
 
-                # Get optimal path
+            if i == j:
+                # If at goal, should suggest IDENTIFY_GOAL
+                match = (suggested_direction == 4)
+                optimal_action_str = "IDENTIFY_GOAL"
+            elif nx.has_path(graph, nodes_list[i], nodes_list[j]):
+                # Get optimal path and compute expected direction
                 path = nx.shortest_path(graph, nodes_list[i], nodes_list[j])
-                optimal_next = path[1] if len(path) > 1 else nodes_list[j]
+                if len(path) > 1:
+                    curr_node = nodes_list[i]
+                    next_node = path[1]
 
-                match = suggested_node == optimal_next
-                total += 1
-                if match:
-                    correct += 1
+                    # Compute expected direction
+                    r_curr, c_curr = curr_node
+                    r_next, c_next = next_node
+                    dr, dc = r_next - r_curr, c_next - c_curr
 
-                symbol = "✓" if match else "✗"
-                print(f"  {symbol} From {nodes_list[i]} to {nodes_list[j]}: "
-                      f"suggested {suggested_node}, optimal {optimal_next}")
+                    if dr == -1 and dc == 0:
+                        expected_dir = 0  # UP
+                    elif dr == 1 and dc == 0:
+                        expected_dir = 1  # DOWN
+                    elif dr == 0 and dc == -1:
+                        expected_dir = 2  # LEFT
+                    elif dr == 0 and dc == 1:
+                        expected_dir = 3  # RIGHT
+                    else:
+                        continue
+
+                    match = (suggested_direction == expected_dir)
+                    optimal_action_str = action_names[expected_dir]
+                else:
+                    continue
+            else:
+                continue
+
+            total += 1
+            if match:
+                correct += 1
+
+            symbol = "✓" if match else "✗"
+            print(f"  {symbol} From {nodes_list[i]} to {nodes_list[j]}: "
+                  f"suggested {action_names[suggested_direction]}, optimal {optimal_action_str}")
 
     print(f"\nAccuracy: {correct}/{total} ({100*correct/total:.1f}%)")
 
@@ -205,6 +281,7 @@ if __name__ == "__main__":
 
     batch_logits = memory.query(batch_states, batch_goals)
     print(f"  Batch logits shape: {batch_logits.shape}")
-    print(f"  Suggested actions: {batch_logits.argmax(dim=1).tolist()}")
+    suggested_directions = batch_logits.argmax(dim=1).tolist()
+    print(f"  Suggested directions: {[action_names[d] for d in suggested_directions]}")
 
     print("\n✓ Slow memory tests passed!")

@@ -278,6 +278,40 @@ class MazeGraph:
 
         # plt.show()
 
+    def get_direction_neighbors(self, node):
+        """
+        Get valid direction-based neighbors for a node.
+
+        Parameters:
+        -----------
+        node : tuple
+            Node position (row, col)
+
+        Returns:
+        --------
+        neighbors : dict
+            Mapping from direction index to neighbor node.
+            Direction encoding: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
+        """
+        r, c = node
+        neighbors = {}
+
+        # Direction mappings
+        directions = {
+            0: (-1, 0),  # UP
+            1: (1, 0),   # DOWN
+            2: (0, -1),  # LEFT
+            3: (0, 1)    # RIGHT
+        }
+
+        for direction_idx, (dr, dc) in directions.items():
+            neighbor = (r + dr, c + dc)
+            # Check if neighbor exists and has an edge in the graph
+            if neighbor in self.graph.nodes() and self.graph.has_edge(node, neighbor):
+                neighbors[direction_idx] = neighbor
+
+        return neighbors
+
     def get_graph(self):
         """Return the NetworkX graph object."""
         return self.graph

@@ -87,8 +87,8 @@ class Stage1Trainer:
             state_encoding = torch.tensor(state['current_encoding'], dtype=torch.float32).unsqueeze(0)
             goal_encoding = torch.tensor(state['goal_encoding'], dtype=torch.float32).unsqueeze(0)
 
-            # Fast network only
-            fast_logits, fast_value, self.agent.fast_hidden = self.agent.fast_network(
+            # Fast network only (returns action_logits, prospection_logits, value, hidden)
+            fast_logits, prospection_logits, fast_value, self.agent.fast_hidden = self.agent.fast_network(
                 state_encoding, goal_encoding, self.agent.fast_hidden
             )
 
@@ -119,6 +119,9 @@ class Stage1Trainer:
         next_state_encoding = torch.tensor(state['current_encoding'], dtype=torch.float32)
         next_goal_encoding = torch.tensor(state['goal_encoding'], dtype=torch.float32)
 
+        # Create lambdas list (constant lambda for Stage 1)
+        lambdas = [self.fast_trainer.lambda_] * len(states)
+
         trajectory = {
             'states': states,
             'goals': goals,
@@ -129,7 +132,8 @@ class Stage1Trainer:
             'values': values,
             'next_state': next_state_encoding,
             'next_goal': next_goal_encoding,
-            'hiddens': hiddens
+            'hiddens': hiddens,
+            'lambdas': lambdas  # Add lambdas for prospection target construction
         }
 
         return trajectory, episode_reward, len(states), success
@@ -226,7 +230,7 @@ class Stage2Trainer:
         self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=3e-4, gamma=gamma)
         self.controller_trainer = MetaControllerTrainer(agent.controller, lr=lr_controller, gamma=gamma)
 
-    def collect_trajectory(self, max_steps=50, temperature=0.5):
+    def collect_trajectory(self, max_steps=100, temperature=0.5):
         """
         Collect trajectory using full agent (fast + slow + controller).
 
@@ -376,7 +380,8 @@ class Stage2Trainer:
                 'next_state': trajectory['next_state'],
                 'next_goal': trajectory['next_goal'],
                 'hiddens': [None] * len(trajectory['fast_states']),
-                'used_slow': used_slow_flags  # Add teacher forcing information
+                'used_slow': used_slow_flags,  # Add teacher forcing information
+                'lambdas': trajectory['fast_lambdas']  # Add lambdas for prospection targets
             }
             fast_loss = self.fast_trainer.train_step(fast_traj)
             loss_dict['fast'] = fast_loss
@@ -887,7 +892,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.35)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.45)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -897,7 +902,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.35
+        control_cost=0.45
     )
 
     print(f"Agent created")

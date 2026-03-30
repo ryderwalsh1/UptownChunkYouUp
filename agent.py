@@ -112,7 +112,7 @@ class CognitiveAgent:
         """
         with torch.no_grad() if not train_mode else torch.enable_grad():
             # 1. Fast network forward pass
-            fast_logits, fast_value, self.fast_hidden = self.fast_network(
+            fast_logits, prospection_logits, fast_value, self.fast_hidden = self.fast_network(
                 state_encoding, goal_encoding, self.fast_hidden
             )
 
@@ -176,6 +176,7 @@ class CognitiveAgent:
             'used_slow': used_slow,
             'p_slow': p_slow.item(),
             'fast_logits': fast_logits,
+            'prospection_logits': prospection_logits,
             'slow_logits': slow_logits,
             'fast_value': fast_value,
             'fast_entropy': fast_entropy.item(),
@@ -303,7 +304,7 @@ if __name__ == "__main__":
     maze = MazeGraph(length=4, width=4, corridor=0.5, seed=42)
     graph = maze.get_graph()
     num_nodes = graph.number_of_nodes()
-    num_actions = num_nodes  # Actions are node indices
+    num_actions = 5  # Direction-based actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
 
     print(f"Maze has {num_nodes} nodes")
 
@@ -312,7 +313,7 @@ if __name__ == "__main__":
     agent = CognitiveAgent(
         num_nodes=num_nodes,
         num_actions=num_actions,
-        maze_graph=graph,
+        maze_graph=maze,  # Pass MazeGraph object, not raw graph
         control_cost=0.01
     )
 
@@ -333,8 +334,9 @@ if __name__ == "__main__":
 
     step_info = agent.step(state_encoding, goal_encoding, train_mode=False)
 
+    action_names = {0: 'UP', 1: 'DOWN', 2: 'LEFT', 3: 'RIGHT', 4: 'IDENTIFY_GOAL'}
     print(f"Step completed:")
-    print(f"  Action: {step_info['action']}")
+    print(f"  Action: {action_names[step_info['action']]} ({step_info['action']})")
     print(f"  Used slow: {step_info['used_slow']}")
     print(f"  p_slow: {step_info['p_slow']:.3f}")
     print(f"  Fast entropy: {step_info['fast_entropy']:.3f}")
@@ -365,7 +367,8 @@ if __name__ == "__main__":
         step_info = agent.step(state_encoding, goal_encoding, train_mode=False)
         agent.update_conflict_map(step_info['state_idx'], step_info['kl_divergence'])
 
-        print(f"  Step {i+1}: action={step_info['action']}, used_slow={step_info['used_slow']}, "
+        action_name = action_names[step_info['action']]
+        print(f"  Step {i+1}: action={action_name} ({step_info['action']}), used_slow={step_info['used_slow']}, "
               f"kl={step_info['kl_divergence']:.3f}")
 
     # Get statistics
@@ -386,7 +389,7 @@ if __name__ == "__main__":
     agent.save('/tmp/cognitive_agent_test.pt')
     print("  Saved agent")
 
-    agent2 = CognitiveAgent(num_nodes=num_nodes, num_actions=num_actions, maze_graph=graph)
+    agent2 = CognitiveAgent(num_nodes=num_nodes, num_actions=num_actions, maze_graph=maze)
     agent2.load('/tmp/cognitive_agent_test.pt')
     print("  Loaded agent")
 

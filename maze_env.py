@@ -44,7 +44,14 @@ class MazeEnvironment:
         self.idx_to_node = {idx: node for node, idx in self.node_to_idx.items()}
 
         self.num_nodes = len(self.nodes_list)
-        self.num_actions = self.num_nodes  # Actions are node indices (allows teleportation)
+        self.num_actions = 5  # Actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
+
+        # Direction mappings
+        self.DIRECTION_UP = 0
+        self.DIRECTION_DOWN = 1
+        self.DIRECTION_LEFT = 2
+        self.DIRECTION_RIGHT = 3
+        self.IDENTIFY_GOAL = 4
 
         # State variables
         self.current_pos = None
@@ -131,7 +138,8 @@ class MazeEnvironment:
         Parameters:
         -----------
         action : int
-            Action (node index to move to - allows teleportation)
+            Action in direction space:
+            0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
         used_slow : bool
             Whether slow processing was used (for control cost)
 
@@ -146,32 +154,46 @@ class MazeEnvironment:
         info : dict
             Additional information
         """
-        # Action is directly the node index to move to
-        # Networks can "teleport" to any node
-        if 0 <= action < self.num_nodes:
-            self.current_pos = self.idx_to_node[action]
-            invalid_move = False
+        invalid_move = False
+        old_pos = self.current_pos
+
+        # Handle IDENTIFY_GOAL action
+        if action == self.IDENTIFY_GOAL:
+            if self.current_pos == self.goal_pos:
+                # Correctly identified goal
+                reward = 10.0
+                done = True
+            else:
+                # Incorrectly identified goal - stay in place
+                reward = -0.1  # Standard step penalty
+                done = False
+                invalid_move = False  # Not invalid, just incorrect
+
+        # Handle direction-based movement
+        elif action in [self.DIRECTION_UP, self.DIRECTION_DOWN, self.DIRECTION_LEFT, self.DIRECTION_RIGHT]:
+            # Get valid neighbors in all directions
+            direction_neighbors = self.maze.get_direction_neighbors(self.current_pos)
+
+            # Check if this direction is valid
+            if action in direction_neighbors:
+                # Valid move - update position
+                self.current_pos = direction_neighbors[action]
+                invalid_move = False
+            else:
+                # Invalid move - stay in place
+                invalid_move = True
+
+            # Calculate reward (only if not identify_goal)
+            reward = -0.1  # Standard step penalty
+            done = False
+
         else:
-            # Invalid action index - stay in place
+            # Invalid action value
             invalid_move = True
+            reward = -0.1
+            done = False
 
         self.step_count += 1
-
-        # Calculate reward
-        reward = 0.0
-        done = False
-
-        # Goal reward
-        if self.current_pos == self.goal_pos:
-            reward += 10.0  # Large positive reward for reaching goal
-            done = True
-
-        # Step penalty (efficiency term - encourages shorter paths)
-        reward -= 0.1
-
-        # Invalid move penalty
-        if invalid_move:
-            reward -= 1.0
 
         # Control cost
         if used_slow:
@@ -189,7 +211,8 @@ class MazeEnvironment:
             'used_slow': used_slow,
             'total_control_cost': self.total_control_cost,
             'used_slow_count': self.used_slow_count,
-            'reached_goal': self.current_pos == self.goal_pos
+            'reached_goal': self.current_pos == self.goal_pos,
+            'old_pos': old_pos
         }
 
         return self._get_state(), reward, done, info
@@ -213,29 +236,47 @@ class MazeEnvironment:
 
     def get_optimal_next_action(self, pos=None, goal=None):
         """
-        Get optimal next action (node index) from pos toward goal using shortest path.
+        Get optimal next action (direction) from pos toward goal using shortest path.
 
-        Returns None if no path exists or already at goal.
+        Returns None if no path exists. Returns IDENTIFY_GOAL if already at goal.
         """
         if pos is None:
             pos = self.current_pos
         if goal is None:
             goal = self.goal_pos
 
+        # If at goal, identify it
         if pos == goal:
-            return None
+            return self.IDENTIFY_GOAL
 
         if not nx.has_path(self.graph, pos, goal):
             return None
 
         path = nx.shortest_path(self.graph, pos, goal)
         if len(path) < 2:
-            return None
+            return self.IDENTIFY_GOAL
 
         next_pos = path[1]
 
-        # Action is directly the node index
-        return self.node_to_idx[next_pos]
+        # Convert next position to direction
+        r_curr, c_curr = pos
+        r_next, c_next = next_pos
+
+        dr = r_next - r_curr
+        dc = c_next - c_curr
+
+        # Map to direction
+        if dr == -1 and dc == 0:
+            return self.DIRECTION_UP
+        elif dr == 1 and dc == 0:
+            return self.DIRECTION_DOWN
+        elif dr == 0 and dc == -1:
+            return self.DIRECTION_LEFT
+        elif dr == 0 and dc == 1:
+            return self.DIRECTION_RIGHT
+        else:
+            # Should not happen if graph is valid
+            return None
 
     def render(self, title=None):
         """
@@ -288,11 +329,12 @@ class MazeEnvironment:
 
 
 if __name__ == "__main__":
-    # Test the environment
+    # Test the environment with direction-based actions
     env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60)
 
     print(f"Environment created with {env.num_nodes} nodes")
-    print(f"Action space: {env.num_actions} actions (up, down, left, right)")
+    print(f"Action space: {env.num_actions} actions")
+    print(f"  0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL")
 
     # Test episode
     state = env.reset()
@@ -303,19 +345,20 @@ if __name__ == "__main__":
 
     # Take a few steps using optimal actions
     print(f"\nTaking optimal steps:")
-    for i in range(100):
-        if env.current_pos == env.goal_pos:
-            print("  Reached goal!")
-            break
+    action_names = {0: 'UP', 1: 'DOWN', 2: 'LEFT', 3: 'RIGHT', 4: 'IDENTIFY_GOAL'}
 
+    for i in range(100):
         optimal_action = env.get_optimal_next_action()
         if optimal_action is None:
             print("  No path to goal!")
             break
 
+        action_name = action_names.get(optimal_action, 'UNKNOWN')
         state, reward, done, info = env.step(optimal_action, used_slow=False)
-        print(f"  Step {i+1}: action={optimal_action}, pos={state['current_pos']}, reward={reward:.2f}, done={done}")
+        print(f"  Step {i+1}: action={action_name} ({optimal_action}), pos={state['current_pos']}, reward={reward:.2f}, done={done}")
 
         if done:
             print(f"  Episode finished! Reached goal: {info['reached_goal']}")
             break
+
+    print("\n✓ MazeEnvironment tests passed!")

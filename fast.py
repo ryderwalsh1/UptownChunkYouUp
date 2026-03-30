@@ -46,11 +46,20 @@ class FastNetwork(nn.Module):
             batch_first=True
         )
 
-        # Policy head (outputs action logits)
-        self.policy_head = nn.Sequential(
+        # Action head (outputs direction-space action logits: 5 actions)
+        # This is the causal policy that actually selects environment actions
+        self.action_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_actions)
+            nn.Linear(hidden_dim, 5)  # 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
+        )
+
+        # Prospection head (outputs node-space predictions: num_nodes)
+        # This is an auxiliary predictive head trained on future-state targets
+        self.prospection_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_nodes)
         )
 
         # Value head (outputs state value estimate)
@@ -83,7 +92,9 @@ class FastNetwork(nn.Module):
         Returns:
         --------
         action_logits : torch.Tensor
-            Logits over actions [batch_size, num_actions]
+            Logits over direction actions [batch_size, 5]
+        prospection_logits : torch.Tensor
+            Logits over node predictions [batch_size, num_nodes]
         value : torch.Tensor
             State value estimate [batch_size, 1]
         hidden : torch.Tensor
@@ -108,11 +119,12 @@ class FastNetwork(nn.Module):
         gru_out, hidden = self.gru(combined, hidden)
         gru_out = gru_out.squeeze(1)  # [batch_size, hidden_dim]
 
-        # Generate action logits and value
-        action_logits = self.policy_head(gru_out)
-        value = self.value_head(gru_out)
+        # Generate outputs from both heads
+        action_logits = self.action_head(gru_out)  # [batch_size, 5]
+        prospection_logits = self.prospection_head(gru_out)  # [batch_size, num_nodes]
+        value = self.value_head(gru_out)  # [batch_size, 1]
 
-        return action_logits, value, hidden
+        return action_logits, prospection_logits, value, hidden
 
     def get_action_distribution(self, action_logits):
         """
@@ -208,7 +220,7 @@ class FastNetwork(nn.Module):
 class FastNetworkTrainer:
     """Trainer for fast network using actor-critic with TD(λ)."""
 
-    def __init__(self, network, lr=3e-4, gamma=0.99, lambda_=0.95, entropy_coef=0.01, value_coef=0.5, teacher_coef=1.0):
+    def __init__(self, network, lr=3e-4, gamma=0.99, lambda_=0.95, entropy_coef=0.01, value_coef=0.5, teacher_coef=1.0, prospection_coef=0.5):
         """
         Initialize trainer.
 
@@ -228,6 +240,8 @@ class FastNetworkTrainer:
             Coefficient for value loss
         teacher_coef : float
             Coefficient for teacher forcing loss when slow memory is used
+        prospection_coef : float
+            Coefficient for prospection auxiliary loss
         """
         self.network = network
         self.optimizer = torch.optim.Adam(network.parameters(), lr=lr)
@@ -236,6 +250,63 @@ class FastNetworkTrainer:
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
         self.teacher_coef = teacher_coef
+        self.prospection_coef = prospection_coef
+
+    def compute_prospection_targets(self, trajectory, lambdas=None):
+        """
+        Compute λ-weighted future-state targets for prospection head.
+
+        For each timestep t, builds soft target over future visited nodes:
+        target_t[j] = Σ_{k≥1} [Π_{m=0}^{k-1} λ_{t+m}] × 𝟙[s_{t+k} = j]
+
+        Parameters:
+        -----------
+        trajectory : dict
+            Trajectory with 'states' (list of state encodings)
+        lambdas : list of float, optional
+            Lambda values for each timestep. If None, use self.lambda_
+
+        Returns:
+        --------
+        targets : torch.Tensor
+            Prospection targets [T, num_nodes] (normalized probability distributions)
+        """
+        states = trajectory['states']
+        T = len(states)
+        num_nodes = states[0].shape[0]
+
+        # If lambdas not provided, use constant lambda
+        if lambdas is None:
+            lambdas = [self.lambda_] * T
+
+        targets = []
+
+        for t in range(T):
+            target = torch.zeros(num_nodes)
+            lambda_product = 1.0
+
+            # Sum over future timesteps
+            for k in range(1, T - t):
+                # Accumulate lambda product
+                lambda_product *= lambdas[t + k - 1]
+
+                # Get state at t+k
+                future_state = states[t + k]  # one-hot encoding
+                state_idx = future_state.argmax().item()
+
+                # Add contribution
+                target[state_idx] += lambda_product
+
+            # Normalize to probability distribution
+            if target.sum() > 0:
+                target = target / target.sum()
+            else:
+                # If no future states (end of trajectory), use uniform
+                target = torch.ones(num_nodes) / num_nodes
+
+            targets.append(target)
+
+        return torch.stack(targets)
 
     def compute_gae(self, rewards, values, dones, next_value, gamma=None, lambda_=None):
         """
@@ -341,7 +412,7 @@ class FastNetworkTrainer:
         with torch.no_grad():
             next_state = trajectory['next_state'].unsqueeze(0)
             next_goal = trajectory['next_goal'].unsqueeze(0)
-            _, next_value, _ = self.network(next_state, next_goal)
+            _, _, next_value, _ = self.network(next_state, next_goal)
             next_value = next_value.squeeze()
 
         # Compute advantages and returns using GAE
@@ -358,6 +429,7 @@ class FastNetworkTrainer:
 
         # Recompute outputs with current network
         action_logits_list = []
+        prospection_logits_list = []
         values_list = []
         entropies_list = []
 
@@ -366,12 +438,14 @@ class FastNetworkTrainer:
             state = states[t:t+1]
             goal = goals[t:t+1]
 
-            action_logits, value, hidden = self.network(state, goal, hidden)
+            action_logits, prospection_logits, value, hidden = self.network(state, goal, hidden)
             action_logits_list.append(action_logits)
+            prospection_logits_list.append(prospection_logits)
             values_list.append(value.squeeze())
             entropies_list.append(self.network.compute_entropy(action_logits))
 
         action_logits = torch.cat(action_logits_list, dim=0)
+        prospection_logits = torch.cat(prospection_logits_list, dim=0)
         values = torch.stack(values_list)
         entropies = torch.stack(entropies_list)
 
@@ -399,8 +473,18 @@ class FastNetworkTrainer:
                     actions[slow_mask]
                 )
 
+        # Prospection loss: auxiliary supervised loss on future-state predictions
+        prospection_loss = torch.tensor(0.0)
+        if 'lambdas' in trajectory:
+            # Compute prospection targets using lambda-weighted future states
+            prospection_targets = self.compute_prospection_targets(trajectory, trajectory['lambdas'])
+            # Cross-entropy loss between prospection logits and soft targets
+            prospection_probs = F.log_softmax(prospection_logits, dim=-1)
+            prospection_loss = -(prospection_targets * prospection_probs).sum(dim=-1).mean()
+
         # Total loss
-        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss + self.teacher_coef * teacher_loss
+        loss = (policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss +
+                self.teacher_coef * teacher_loss + self.prospection_coef * prospection_loss)
 
         # Check for NaN loss
         if torch.isnan(loss):
@@ -415,6 +499,7 @@ class FastNetworkTrainer:
                 'value_loss': value_loss.item() if not torch.isnan(value_loss) else float('nan'),
                 'entropy_loss': entropy_loss.item() if not torch.isnan(entropy_loss) else float('nan'),
                 'teacher_loss': teacher_loss.item() if not torch.isnan(teacher_loss) else float('nan'),
+                'prospection_loss': prospection_loss.item() if not torch.isnan(prospection_loss) else float('nan'),
                 'mean_entropy': 0.0,
                 'mean_value': 0.0
             }
@@ -431,17 +516,18 @@ class FastNetworkTrainer:
             'value_loss': value_loss.item(),
             'entropy_loss': entropy_loss.item(),
             'teacher_loss': teacher_loss.item(),
+            'prospection_loss': prospection_loss.item(),
             'mean_entropy': entropies.mean().item(),
             'mean_value': values.mean().item()
         }
 
 
 if __name__ == "__main__":
-    # Test the fast network
-    print("Testing Fast Network...")
+    # Test the fast network with dual heads
+    print("Testing Fast Network with dual heads...")
 
     num_nodes = 64
-    num_actions = num_nodes  # Actions are node indices
+    num_actions = 5  # Direction-based actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL
     batch_size = 8
 
     # Create network
@@ -456,20 +542,22 @@ if __name__ == "__main__":
     goal_encoding[:, num_nodes-1] = 1.0  # One-hot
 
     # Forward pass
-    action_logits, value, hidden = network(state_encoding, goal_encoding)
+    action_logits, prospection_logits, value, hidden = network(state_encoding, goal_encoding)
     print(f"\nForward pass:")
-    print(f"  Action logits shape: {action_logits.shape}")
+    print(f"  Action logits shape: {action_logits.shape} (direction-space)")
+    print(f"  Prospection logits shape: {prospection_logits.shape} (node-space)")
     print(f"  Value shape: {value.shape}")
     print(f"  Hidden shape: {hidden.shape}")
 
     # Compute entropy
     entropy = network.compute_entropy(action_logits)
-    print(f"  Entropy: {entropy.mean().item():.3f}")
+    print(f"  Action entropy: {entropy.mean().item():.3f}")
 
     # Sample action
     action, log_prob = network.sample_action(action_logits)
-    print(f"  Sampled action: {action}")
-    print(f"  Log prob: {log_prob}")
+    action_names = {0: 'UP', 1: 'DOWN', 2: 'LEFT', 3: 'RIGHT', 4: 'IDENTIFY_GOAL'}
+    print(f"  Sampled actions: {[action_names[a.item()] for a in action]}")
+    print(f"  Log probs: {log_prob}")
 
     # Test trainer
     print("\nTesting FastNetworkTrainer...")
@@ -480,14 +568,15 @@ if __name__ == "__main__":
     trajectory = {
         'states': [torch.zeros(num_nodes) for _ in range(T)],
         'goals': [torch.zeros(num_nodes) for _ in range(T)],
-        'actions': [np.random.randint(num_actions) for _ in range(T)],
+        'actions': [np.random.randint(5) for _ in range(T)],  # Direction actions
         'rewards': [np.random.randn() for _ in range(T)],
         'dones': [False] * (T-1) + [True],
         'log_probs': [torch.tensor(0.0) for _ in range(T)],
         'values': [torch.tensor(0.0) for _ in range(T)],
         'next_state': torch.zeros(num_nodes),
         'next_goal': torch.zeros(num_nodes),
-        'hiddens': [None] * T
+        'hiddens': [None] * T,
+        'lambdas': [0.95] * T  # Add lambdas for prospection training
     }
 
     # Make states one-hot
