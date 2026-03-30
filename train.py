@@ -891,10 +891,20 @@ if __name__ == "__main__":
     # Create environment
     from corridors import MazeGraph
 
+    # Training configuration
+    fixed_start_node = (7, 0)  # Set to None for random starts each episode
+    goal_is_deadend = True      # True = goals always at dead-ends, False = random goals
+
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.45)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60,
+                          control_cost=0.25,
+                          fixed_start_node=fixed_start_node,
+                          goal_is_deadend=goal_is_deadend)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
+    print(f"Fixed start node: {fixed_start_node if fixed_start_node else 'Random'}")
+    print(f"Goal selection: {'Dead-ends only' if goal_is_deadend else 'All nodes'}")
+    print(f"Dead-end nodes: {len(env.deadend_nodes)} / {env.num_nodes}")
 
     # Create agent
     # Note: num_actions = num_nodes (actions are node indices, allows teleportation)
@@ -902,7 +912,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.45
+        control_cost=0.25
     )
 
     print(f"Agent created")

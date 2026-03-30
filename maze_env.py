@@ -11,7 +11,8 @@ from corridors import MazeGraph
 
 
 class MazeEnvironment:
-    def __init__(self, length=8, width=8, corridor=0.5, seed=None, control_cost=0.01):
+    def __init__(self, length=8, width=8, corridor=0.5, seed=None, control_cost=0.01,
+                 fixed_start_node=None, goal_is_deadend=False):
         """
         Initialize maze environment.
 
@@ -27,12 +28,20 @@ class MazeEnvironment:
             Random seed for reproducibility
         control_cost : float
             Cost per step for using slow processing
+        fixed_start_node : tuple, optional
+            Fixed starting position (row, col) for all episodes.
+            If None, start position is randomized each episode.
+        goal_is_deadend : bool
+            If True, goal is always selected from dead-end nodes (degree 1).
+            If False, goal is selected randomly from all nodes.
         """
         self.length = length
         self.width = width
         self.corridor = corridor
         self.seed = seed
         self.control_cost = control_cost
+        self.fixed_start_node = fixed_start_node  # None = random, else fixed
+        self.goal_is_deadend = goal_is_deadend
 
         # Generate maze graph
         self.maze = MazeGraph(length=length, width=width, corridor=corridor, seed=seed)
@@ -53,6 +62,12 @@ class MazeEnvironment:
         self.DIRECTION_RIGHT = 3
         self.IDENTIFY_GOAL = 4
 
+        # Identify dead-end nodes (degree 1)
+        self.deadend_nodes = [node for node in self.nodes_list if self.graph.degree(node) == 1]
+        if len(self.deadend_nodes) == 0:
+            print("WARNING: No dead-end nodes found in maze. Using all nodes for goal selection.")
+            self.deadend_nodes = self.nodes_list.copy()
+
         # State variables
         self.current_pos = None
         self.goal_pos = None
@@ -70,9 +85,11 @@ class MazeEnvironment:
         Parameters:
         -----------
         start_pos : tuple, optional
-            Starting position (row, col). If None, random.
+            Starting position (row, col). If provided, overrides fixed_start_node.
+            If None and fixed_start_node is set, uses fixed_start_node.
+            If None and fixed_start_node is None, randomizes start position.
         goal_pos : tuple, optional
-            Goal position (row, col). If None, random (different from start).
+            Goal position (row, col). If None, random based on goal_is_deadend setting.
 
         Returns:
         --------
@@ -80,15 +97,36 @@ class MazeEnvironment:
             Initial state with current_pos, goal_pos, and step_count
         """
         # Set start position
-        if start_pos is None:
-            self.current_pos = self.nodes_list[np.random.randint(self.num_nodes)]
-        else:
+        if start_pos is not None:
+            # Explicit override
             self.current_pos = start_pos
+        elif self.fixed_start_node is not None:
+            # Use fixed start node
+            self.current_pos = self.fixed_start_node
+        else:
+            # Random start (fixed_start_node is None)
+            self.current_pos = self.nodes_list[np.random.randint(self.num_nodes)]
+
+        # Verify start position is valid
+        if self.current_pos not in self.nodes_list:
+            raise ValueError(f"Start position {self.current_pos} is not a valid node in the maze")
 
         # Set goal position
         if goal_pos is None:
-            # Choose random goal different from start
-            possible_goals = [n for n in self.nodes_list if n != self.current_pos]
+            # Choose goal based on goal_is_deadend setting
+            if self.goal_is_deadend:
+                # Select from dead-end nodes only
+                possible_goals = [n for n in self.deadend_nodes if n != self.current_pos]
+                if len(possible_goals) == 0:
+                    # If start is the only dead-end, select from all other nodes
+                    possible_goals = [n for n in self.nodes_list if n != self.current_pos]
+            else:
+                # Select from all nodes
+                possible_goals = [n for n in self.nodes_list if n != self.current_pos]
+
+            if len(possible_goals) == 0:
+                raise ValueError(f"No valid goal positions (maze has only one node)")
+
             self.goal_pos = possible_goals[np.random.randint(len(possible_goals))]
         else:
             self.goal_pos = goal_pos
@@ -329,22 +367,38 @@ class MazeEnvironment:
 
 
 if __name__ == "__main__":
-    # Test the environment with direction-based actions
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60)
+    # Test the environment with direction-based actions, fixed start, and dead-end goals
+    fixed_start = (0, 0)  # Top-left corner, set to None for random starts
+    goal_is_deadend = True  # Goals always at dead-ends
+
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60,
+                          fixed_start_node=fixed_start,
+                          goal_is_deadend=goal_is_deadend)
 
     print(f"Environment created with {env.num_nodes} nodes")
     print(f"Action space: {env.num_actions} actions")
     print(f"  0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=IDENTIFY_GOAL")
+    print(f"Fixed start node: {fixed_start if fixed_start else 'Random'}")
+    print(f"Goal selection: {'Dead-ends only' if goal_is_deadend else 'All nodes'}")
+    print(f"Dead-end nodes found: {len(env.deadend_nodes)}")
+    print(f"Dead-end positions: {env.deadend_nodes[:5]}..." if len(env.deadend_nodes) > 5 else f"Dead-end positions: {env.deadend_nodes}")
 
-    # Test episode
-    state = env.reset()
-    print(f"\nEpisode started:")
-    print(f"  Start: {state['current_pos']}")
-    print(f"  Goal: {state['goal_pos']}")
-    print(f"  Optimal path length: {env.get_optimal_path_length()}")
+    # Test multiple episodes
+    print(f"\nTesting across 3 episodes:")
+    for ep in range(3):
+        state = env.reset()
+        goal_degree = env.graph.degree(state['goal_pos'])
+        is_deadend = state['goal_pos'] in env.deadend_nodes
 
-    # Take a few steps using optimal actions
-    print(f"\nTaking optimal steps:")
+        print(f"\nEpisode {ep+1}:")
+        print(f"  Start: {state['current_pos']}" + (f" (always {fixed_start})" if fixed_start else " (random)"))
+        print(f"  Goal: {state['goal_pos']} (degree={goal_degree}, is_deadend={is_deadend})")
+        print(f"  Optimal path length: {env.get_optimal_path_length()}")
+
+    # Take a few steps using optimal actions in one episode
+    print(f"\nTaking optimal steps in one episode:")
+    state = env.reset()  # Start new episode
+    print(f"  Starting at: {state['current_pos']}, Goal: {state['goal_pos']}")
     action_names = {0: 'UP', 1: 'DOWN', 2: 'LEFT', 3: 'RIGHT', 4: 'IDENTIFY_GOAL'}
 
     for i in range(100):
