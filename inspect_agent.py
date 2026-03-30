@@ -726,9 +726,9 @@ def main():
                         help='Maze length')
     parser.add_argument('--width', type=int, default=8,
                         help='Maze width')
-    parser.add_argument('--corridor', type=float, default=0.5,
+    parser.add_argument('--corridor', type=float, default=1.0,
                         help='Corridor parameter')
-    parser.add_argument('--control-cost', type=float, default=0.3,
+    parser.add_argument('--control-cost', type=float, default=0.2,
                         help='Control cost')
 
     args = parser.parse_args()
