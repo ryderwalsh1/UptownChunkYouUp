@@ -226,7 +226,7 @@ class Stage2Trainer:
         self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=3e-4, gamma=gamma)
         self.controller_trainer = MetaControllerTrainer(agent.controller, lr=lr_controller, gamma=gamma)
 
-    def collect_trajectory(self, max_steps=50, temperature=1.0):
+    def collect_trajectory(self, max_steps=50, temperature=0.5):
         """
         Collect trajectory using full agent (fast + slow + controller).
 
@@ -429,8 +429,7 @@ class Stage2Trainer:
             'mean_kl_divergence': [],
             'used_slow_count': [],
             'used_fast_count': [],
-            'mean_q_fast': [],  # Mean Q-value for fast control action
-            'mean_q_slow': [],  # Mean Q-value for slow control action
+            'mean_delta': [],  # Mean advantage (Q_slow - Q_fast)
             'losses': []
         }
 
@@ -472,9 +471,8 @@ class Stage2Trainer:
             used_slow_count = sum([1 for info in step_infos if info['used_slow']])
             used_fast_count = len(step_infos) - used_slow_count
 
-            # Compute mean Q-values for controller
-            mean_q_fast = np.mean([info['meta_values'][0, 0].item() for info in step_infos])
-            mean_q_slow = np.mean([info['meta_values'][0, 1].item() for info in step_infos])
+            # Compute mean delta (advantage)
+            mean_delta = np.mean([info['delta'].item() for info in step_infos])
 
             # Log metrics
             metrics['episode_rewards'].append(episode_reward)
@@ -488,8 +486,7 @@ class Stage2Trainer:
             metrics['mean_kl_divergence'].append(mean_kl_divergence)
             metrics['used_slow_count'].append(used_slow_count)
             metrics['used_fast_count'].append(used_fast_count)
-            metrics['mean_q_fast'].append(mean_q_fast)
-            metrics['mean_q_slow'].append(mean_q_slow)
+            metrics['mean_delta'].append(mean_delta)
             metrics['losses'].append(loss_dict)
 
             # Periodic logging
@@ -685,26 +682,28 @@ def plot_stage2_curves(stage2_metrics, save_path='stage2_training.png'):
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
 
-    # 6. Controller Q-Values overlaid (raw + smoothed)
+    # 6. Controller Advantage (Delta = Q_slow - Q_fast)
     ax = axes[1, 2]
-    q_fast = stage2_metrics['mean_q_fast']
-    q_slow = stage2_metrics['mean_q_slow']
-    episodes = np.arange(len(q_fast))
+    delta = stage2_metrics['mean_delta']
+    episodes = np.arange(len(delta))
 
     # Smoothed values
-    if len(q_fast) > window:
-        q_fast_smoothed = np.convolve(q_fast, np.ones(window)/window, mode='valid')
-        q_slow_smoothed = np.convolve(q_slow, np.ones(window)/window, mode='valid')
-        smoothed_episodes = np.arange(window//2, window//2 + len(q_fast_smoothed))
-        ax.plot(smoothed_episodes, q_fast_smoothed, color='#457B9D', linewidth=2, label='Q(fast)')
-        ax.plot(smoothed_episodes, q_slow_smoothed, color='#E63946', linewidth=2, label='Q(slow)')
+    if len(delta) > window:
+        delta_smoothed = np.convolve(delta, np.ones(window)/window, mode='valid')
+        smoothed_episodes = np.arange(window//2, window//2 + len(delta_smoothed))
+        ax.plot(smoothed_episodes, delta_smoothed, color='#6A4C93', linewidth=2, label='Delta')
+        # Add horizontal line at control_cost if we can infer it
+        # (assuming default 0.3 from main)
+        ax.axhline(y=0.3, color='#E63946', linestyle='--', linewidth=1.5, alpha=0.7, label='Control Cost')
+        ax.axhline(y=0, color='#333', linestyle='-', linewidth=0.5, alpha=0.5)
     else:
-        ax.plot(episodes, q_fast, color='#457B9D', linewidth=2, label='Q(fast)')
-        ax.plot(episodes, q_slow, color='#E63946', linewidth=2, label='Q(slow)')
+        ax.plot(episodes, delta, color='#6A4C93', linewidth=2, label='Delta')
+        ax.axhline(y=0.3, color='#E63946', linestyle='--', linewidth=1.5, alpha=0.7, label='Control Cost')
+        ax.axhline(y=0, color='#333', linestyle='-', linewidth=0.5, alpha=0.5)
 
     ax.set_xlabel('Episode', fontsize=10)
-    ax.set_ylabel('Q-Value', fontsize=10)
-    ax.set_title('Controller Q-Values', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Advantage', fontsize=10)
+    ax.set_title('Controller Advantage (Δ = Q_slow - Q_fast)', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
 
@@ -888,7 +887,7 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     maze = MazeGraph(length=8, width=8, corridor=0.5, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.4)
+    env = MazeEnvironment(length=8, width=8, corridor=0.5, seed=60, control_cost=0.35)
 
     print(f"Environment: {env.num_nodes} nodes, {env.num_actions} actions")
 
@@ -898,7 +897,7 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.4
+        control_cost=0.35
     )
 
     print(f"Agent created")

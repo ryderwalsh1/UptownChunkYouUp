@@ -51,7 +51,8 @@ The inspection shows the full cognitive architecture computation:
    - Fast entropy: confidence of fast network
 
 🎮 META-CONTROLLER:
-   - Q(fast), Q(slow): value estimates for using each system
+   - Delta (Q_slow - Q_fast): advantage of using slow processing
+   - Control cost threshold: cost that delta must exceed to prefer slow
    - p(slow): probability of selecting slow processing
    - Selected: which system was actually used
 
@@ -159,8 +160,9 @@ def inspect_state(agent, env, state_idx, goal_idx, verbose=True):
         print(f"  Fast entropy: {step_info['fast_entropy']:.4f}")
 
         print(f"\n🎮 META-CONTROLLER:")
-        print(f"  Q(fast): {step_info['meta_values'][0, 0].item():.4f}")
-        print(f"  Q(slow): {step_info['meta_values'][0, 1].item():.4f}")
+        print(f"  Delta (Q_slow - Q_fast): {step_info['delta'].item():.4f}")
+        print(f"  Control cost threshold: {agent.controller.control_cost:.4f}")
+        print(f"  Decision rule: delta > {agent.controller.control_cost:.4f} → prefer slow")
         print(f"  p(slow): {step_info['p_slow']:.4f}")
         print(f"  Selected: {'SLOW' if step_info['used_slow'] else 'FAST'}")
 

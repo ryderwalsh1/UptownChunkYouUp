@@ -12,9 +12,9 @@ import numpy as np
 
 
 class MetaController(nn.Module):
-    def __init__(self, num_nodes, embedding_dim=64, hidden_dim=128, num_control_actions=2):
+    def __init__(self, num_nodes, embedding_dim=64, hidden_dim=128, control_cost=0.01):
         """
-        Initialize meta-controller network.
+        Initialize meta-controller network with advantage-based formulation.
 
         Parameters:
         -----------
@@ -24,15 +24,16 @@ class MetaController(nn.Module):
             Dimension of state embedding
         hidden_dim : int
             Dimension of hidden layers
-        num_control_actions : int
-            Number of control actions (default: 2 for use_fast, use_slow)
+        control_cost : float
+            Cost penalty for using slow processing (used as decision threshold)
         """
         super(MetaController, self).__init__()
 
         self.num_nodes = num_nodes
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
-        self.num_control_actions = num_control_actions
+        self.control_cost = control_cost
+        self.num_control_actions = 2  # Still 2 actions: use_fast, use_slow
 
         # Control action mapping
         self.USE_FAST = 0
@@ -48,14 +49,14 @@ class MetaController(nn.Module):
         # - conflict map value: 1
         input_dim = embedding_dim + 3
 
-        # Meta-value network
-        # Outputs Q-values for each control action
+        # Advantage network
+        # Outputs delta = Q_slow - Q_fast (advantage of using slow processing)
         self.meta_value_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_control_actions)
+            nn.Linear(hidden_dim, 1)  # Single advantage value
         )
 
     def forward(self, state_encoding, fast_entropy, kl_divergence, conflict_map_value):
@@ -75,8 +76,8 @@ class MetaController(nn.Module):
 
         Returns:
         --------
-        meta_values : torch.Tensor
-            Q-values for control actions [batch_size, num_control_actions]
+        delta : torch.Tensor
+            Advantage of using slow processing (Q_slow - Q_fast) [batch_size, 1]
         """
         batch_size = state_encoding.shape[0]
 
@@ -107,39 +108,49 @@ class MetaController(nn.Module):
             conflict_map_value
         ], dim=-1)
 
-        # Compute meta-values
-        meta_values = self.meta_value_net(features)
+        # Compute advantage (delta = Q_slow - Q_fast)
+        delta = self.meta_value_net(features)
 
-        return meta_values
+        return delta
 
-    def get_control_policy(self, meta_values, temperature=1.0):
+    def get_control_policy(self, delta, temperature=1.0):
         """
-        Convert meta-values to control policy via softmax.
+        Convert advantage delta to control policy via sigmoid.
+
+        Uses: p(slow) = sigmoid((delta - control_cost) / temperature)
 
         Parameters:
         -----------
-        meta_values : torch.Tensor
-            Q-values for control actions [batch_size, num_control_actions]
+        delta : torch.Tensor
+            Advantage of using slow (Q_slow - Q_fast) [batch_size, 1]
         temperature : float
-            Temperature for softmax (higher = more exploration)
+            Temperature for sigmoid (higher = more exploration)
 
         Returns:
         --------
         probs : torch.Tensor
-            Probability distribution over control actions [batch_size, num_control_actions]
+            Probability distribution over control actions [batch_size, 2]
+            probs[:, 0] = p(fast), probs[:, 1] = p(slow)
         """
-        return F.softmax(meta_values / temperature, dim=-1)
+        # Apply control cost threshold and temperature
+        logit = (delta - self.control_cost) / temperature
+        p_slow = torch.sigmoid(logit)  # [batch_size, 1]
+        p_fast = 1 - p_slow
 
-    def sample_control_action(self, meta_values, temperature=1.0):
+        # Return as [batch_size, 2] for compatibility
+        probs = torch.cat([p_fast, p_slow], dim=-1)
+        return probs
+
+    def sample_control_action(self, delta, temperature=1.0):
         """
         Sample control action from policy.
 
         Parameters:
         -----------
-        meta_values : torch.Tensor
-            Q-values for control actions [batch_size, num_control_actions]
+        delta : torch.Tensor
+            Advantage of using slow (Q_slow - Q_fast) [batch_size, 1]
         temperature : float
-            Temperature for softmax
+            Temperature for sigmoid
 
         Returns:
         --------
@@ -148,14 +159,14 @@ class MetaController(nn.Module):
         log_prob : torch.Tensor
             Log probability of sampled action [batch_size]
         probs : torch.Tensor
-            Full probability distribution [batch_size, num_control_actions]
+            Full probability distribution [batch_size, 2]
         """
-        probs = self.get_control_policy(meta_values, temperature)
+        probs = self.get_control_policy(delta, temperature)
 
         # Check for NaN or Inf
         if torch.isnan(probs).any() or torch.isinf(probs).any():
             print(f"WARNING: NaN or Inf detected in control probabilities!")
-            print(f"  meta_values: {meta_values}")
+            print(f"  delta: {delta}")
             print(f"  probs: {probs}")
             # Replace with uniform distribution
             probs = torch.ones_like(probs) / probs.shape[-1]
@@ -165,7 +176,7 @@ class MetaController(nn.Module):
         log_prob = dist.log_prob(action)
         return action, log_prob, probs
 
-    def get_slow_probability(self, meta_values, temperature=1.0):
+    def get_slow_probability(self, delta, temperature=1.0):
         """
         Get probability of using slow processing.
 
@@ -173,36 +184,36 @@ class MetaController(nn.Module):
 
         Parameters:
         -----------
-        meta_values : torch.Tensor
-            Q-values for control actions [batch_size, num_control_actions]
+        delta : torch.Tensor
+            Advantage of using slow (Q_slow - Q_fast) [batch_size, 1]
         temperature : float
-            Temperature for softmax
+            Temperature for sigmoid
 
         Returns:
         --------
         p_slow : torch.Tensor
             Probability of use_slow action [batch_size]
         """
-        probs = self.get_control_policy(meta_values, temperature)
+        probs = self.get_control_policy(delta, temperature)
         return probs[:, self.USE_SLOW]
 
-    def compute_entropy(self, meta_values, temperature=1.0):
+    def compute_entropy(self, delta, temperature=1.0):
         """
         Compute entropy of control policy.
 
         Parameters:
         -----------
-        meta_values : torch.Tensor
-            Q-values for control actions [batch_size, num_control_actions]
+        delta : torch.Tensor
+            Advantage of using slow (Q_slow - Q_fast) [batch_size, 1]
         temperature : float
-            Temperature for softmax
+            Temperature for sigmoid
 
         Returns:
         --------
         entropy : torch.Tensor
             Entropy of control policy [batch_size]
         """
-        probs = self.get_control_policy(meta_values, temperature)
+        probs = self.get_control_policy(delta, temperature)
         log_probs = torch.log(probs + 1e-10)
         entropy = -(probs * log_probs).sum(dim=-1)
         return entropy
@@ -305,13 +316,13 @@ class MetaControllerTrainer:
                 returns = returns - returns.mean()
         # If only 1 sample, no normalization needed
 
-        # Recompute meta-values with current controller
-        meta_values = self.controller(states, fast_entropies, kl_divergences, conflict_values)
+        # Recompute delta (advantage) with current controller
+        delta = self.controller(states, fast_entropies, kl_divergences, conflict_values)
 
         # Get log probs and entropy
-        probs = self.controller.get_control_policy(meta_values)
+        probs = self.controller.get_control_policy(delta)
         log_probs = torch.log(probs.gather(1, control_actions.unsqueeze(1)).squeeze(1) + 1e-10)
-        entropies = self.controller.compute_entropy(meta_values)
+        entropies = self.controller.compute_entropy(delta)
 
         # Policy loss (REINFORCE)
         policy_loss = -(log_probs * returns.detach()).mean()
@@ -357,10 +368,12 @@ if __name__ == "__main__":
 
     num_nodes = 64
     batch_size = 8
+    control_cost = 0.3
 
     # Create controller
-    controller = MetaController(num_nodes)
+    controller = MetaController(num_nodes, control_cost=control_cost)
     print(f"Created MetaController with {sum(p.numel() for p in controller.parameters())} parameters")
+    print(f"Control cost: {control_cost}")
 
     # Create random inputs
     state_encoding = torch.zeros(batch_size, num_nodes)
@@ -372,28 +385,28 @@ if __name__ == "__main__":
 
     # Forward pass
     print("\nForward pass:")
-    meta_values = controller(state_encoding, fast_entropy, kl_divergence, conflict_map_value)
-    print(f"  Meta-values shape: {meta_values.shape}")
-    print(f"  Meta-values:\n{meta_values}")
+    delta = controller(state_encoding, fast_entropy, kl_divergence, conflict_map_value)
+    print(f"  Delta shape: {delta.shape}")
+    print(f"  Delta (Q_slow - Q_fast):\n{delta.squeeze()}")
 
     # Get control policy
-    probs = controller.get_control_policy(meta_values)
+    probs = controller.get_control_policy(delta)
     print(f"\n  Control policy (probabilities):")
     print(f"    use_fast: {probs[:, controller.USE_FAST]}")
     print(f"    use_slow: {probs[:, controller.USE_SLOW]}")
     print(f"    Mean p(slow): {probs[:, controller.USE_SLOW].mean().item():.3f}")
 
     # Sample control action
-    action, log_prob, probs = controller.sample_control_action(meta_values)
+    action, log_prob, probs = controller.sample_control_action(delta)
     print(f"\n  Sampled control actions: {action}")
     print(f"  Log probs: {log_prob}")
 
     # Get slow probability for lambda modulation
-    p_slow = controller.get_slow_probability(meta_values)
+    p_slow = controller.get_slow_probability(delta)
     print(f"\n  p_slow (for lambda modulation): {p_slow}")
 
     # Compute entropy
-    entropy = controller.compute_entropy(meta_values)
+    entropy = controller.compute_entropy(delta)
     print(f"  Control policy entropy: {entropy.mean().item():.3f}")
 
     # Test trainer

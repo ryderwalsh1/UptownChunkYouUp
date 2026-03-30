@@ -53,7 +53,7 @@ class CognitiveAgent:
         # Create networks
         self.fast_network = FastNetwork(num_nodes, num_actions, embedding_dim, hidden_dim)
         self.slow_memory = SlowMemory(num_nodes, num_actions)
-        self.controller = MetaController(num_nodes, embedding_dim, hidden_dim)
+        self.controller = MetaController(num_nodes, embedding_dim, hidden_dim, control_cost=control_cost)
 
         # Initialize slow memory if maze graph provided
         if maze_graph is not None:
@@ -129,8 +129,8 @@ class CognitiveAgent:
             state_idx = state_encoding.argmax().item()
             conflict_value = torch.tensor(self.conflict_map.get(state_idx), dtype=torch.float32)
 
-            # 6. Controller forward pass
-            meta_values = self.controller(
+            # 6. Controller forward pass (outputs delta = Q_slow - Q_fast)
+            delta = self.controller(
                 state_encoding,
                 fast_entropy,
                 kl_divergence,
@@ -139,11 +139,11 @@ class CognitiveAgent:
 
             # 7. Sample control action
             control_action, control_log_prob, control_probs = self.controller.sample_control_action(
-                meta_values, temperature
+                delta, temperature
             )
 
             # 8. Get p_slow for lambda modulation
-            p_slow = self.controller.get_slow_probability(meta_values)
+            p_slow = self.controller.get_slow_probability(delta)
 
             # 9. Select policy branch based on control action
             used_slow = (control_action.item() == self.controller.USE_SLOW)
@@ -182,7 +182,7 @@ class CognitiveAgent:
             'kl_divergence': kl_divergence.item(),
             'conflict_value': conflict_value.item(),
             'state_idx': state_idx,
-            'meta_values': meta_values,
+            'delta': delta,  # Advantage (Q_slow - Q_fast)
             'control_probs': control_probs
         }
 
