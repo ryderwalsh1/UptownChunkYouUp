@@ -12,7 +12,7 @@ import numpy as np
 
 
 class FastNetwork(nn.Module):
-    def __init__(self, num_nodes, num_actions, embedding_dim=64, hidden_dim=128):
+    def __init__(self, num_nodes, num_actions, embedding_dim=64, hidden_dim=128, prospection_head=True):
         """
         Initialize fast policy network.
 
@@ -26,6 +26,8 @@ class FastNetwork(nn.Module):
             Dimension of state and goal embeddings
         hidden_dim : int
             Dimension of GRU hidden state
+        prospection_head : bool
+            Whether to include the prospection head (default: True)
         """
         super(FastNetwork, self).__init__()
 
@@ -33,6 +35,7 @@ class FastNetwork(nn.Module):
         self.num_actions = num_actions
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
+        self.has_prospection_head = prospection_head
 
         # State and goal embeddings
         self.state_embedding = nn.Linear(num_nodes, embedding_dim)
@@ -56,11 +59,14 @@ class FastNetwork(nn.Module):
 
         # Prospection head (outputs node-space predictions: num_nodes)
         # This is an auxiliary predictive head trained on future-state targets
-        self.prospection_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_nodes)
-        )
+        if self.has_prospection_head:
+            self.prospection_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_nodes)
+            )
+        else:
+            self.prospection_head = None
 
         # Value head (outputs state value estimate)
         self.value_head = nn.Sequential(
@@ -119,9 +125,9 @@ class FastNetwork(nn.Module):
         gru_out, hidden = self.gru(combined, hidden)
         gru_out = gru_out.squeeze(1)  # [batch_size, hidden_dim]
 
-        # Generate outputs from both heads
+        # Generate outputs from heads
         action_logits = self.action_head(gru_out)  # [batch_size, 5]
-        prospection_logits = self.prospection_head(gru_out)  # [batch_size, num_nodes]
+        prospection_logits = self.prospection_head(gru_out) if self.has_prospection_head else None  # [batch_size, num_nodes] or None
         value = self.value_head(gru_out)  # [batch_size, 1]
 
         return action_logits, prospection_logits, value, hidden
@@ -475,7 +481,7 @@ class FastNetworkTrainer:
 
         # Prospection loss: auxiliary supervised loss on future-state predictions
         prospection_loss = torch.tensor(0.0)
-        if 'lambdas' in trajectory:
+        if self.network.has_prospection_head and 'lambdas' in trajectory:
             # Compute prospection targets using lambda-weighted future states
             prospection_targets = self.compute_prospection_targets(trajectory, trajectory['lambdas'])
             # Cross-entropy loss between prospection logits and soft targets
