@@ -16,6 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+import json
+from datetime import datetime
 
 from maze_env import MazeEnvironment
 from agent import CognitiveAgent
@@ -200,7 +202,7 @@ class Stage1Trainer:
 class Stage2Trainer:
     """Stage 2: Add slow network and meta-controller."""
 
-    def __init__(self, env, agent, lr_slow=3e-4, lr_controller=1e-3,
+    def __init__(self, env, agent, lr_fast = 3e-4, lr_controller=1e-3,
                  gamma=0.99, lambda_init=0.95):
         """
         Initialize Stage 2 trainer.
@@ -227,7 +229,7 @@ class Stage2Trainer:
 
         # Trainers for each component
         # Note: No slow trainer - memory is not trained, only retrieved
-        self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=3e-4, gamma=gamma)
+        self.fast_trainer = FastNetworkTrainer(agent.fast_network, lr=lr_fast, gamma=gamma)
         self.controller_trainer = MetaControllerTrainer(agent.controller, lr=lr_controller, gamma=gamma)
 
     def collect_trajectory(self, max_steps=100, temperature=0.5):
@@ -404,7 +406,8 @@ class Stage2Trainer:
 
         return loss_dict
 
-    def train(self, num_episodes=2000, log_interval=100, temperature_schedule=None):
+    def train(self, num_episodes=2000, log_interval=100, temperature_schedule=None,
+              save_interval=None, save_dir='checkpoints', metadata=None):
         """
         Train full agent (Stage 2).
 
@@ -416,6 +419,12 @@ class Stage2Trainer:
             Logging interval
         temperature_schedule : callable, optional
             Function mapping episode -> temperature
+        save_interval : int, optional
+            Save agent checkpoint every save_interval episodes
+        save_dir : str
+            Directory to save checkpoints
+        metadata : dict, optional
+            Metadata to save (hyperparameters, environment config, etc.)
 
         Returns:
         --------
@@ -441,6 +450,17 @@ class Stage2Trainer:
         print("=" * 70)
         print("STAGE 2: TRAINING WITH SLOW NETWORK AND CONTROLLER")
         print("=" * 70)
+
+        # Create save directory if save_interval is specified
+        if save_interval is not None:
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Save metadata if provided
+            if metadata is not None:
+                metadata_path = os.path.join(save_dir, 'metadata.json')
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                print(f"Metadata saved to {metadata_path}\n")
 
         for episode in tqdm(range(num_episodes), desc="Stage 2"):
             # Get temperature for this episode
@@ -511,6 +531,12 @@ class Stage2Trainer:
 
                 agent_stats = self.agent.get_statistics()
                 print(f"  Empirical p(slow): {agent_stats['p_slow_empirical']:.3f}")
+
+            # Periodic checkpoint saving
+            if save_interval is not None and (episode + 1) % save_interval == 0:
+                checkpoint_path = os.path.join(save_dir, f'agent_{episode + 1}.pt')
+                self.agent.save(checkpoint_path)
+                print(f"\n  Checkpoint saved: {checkpoint_path}")
 
         print("\n" + "=" * 70)
         print("STAGE 2 COMPLETE")
@@ -892,12 +918,32 @@ if __name__ == "__main__":
     from corridors import MazeGraph
 
     # Training configuration
-    fixed_start_node = (6, 1)  # Set to None for random starts each episode
+    fixed_start_node = (7, 0)  # Set to None for random starts each episode
     goal_is_deadend = True      # True = goals always at dead-ends, False = random goals
+    length = 8
+    width = 8
+    corridor = 0.5
+    seed = 60
 
-    maze = MazeGraph(length=8, width=8, corridor=1.0, seed=60)
-    env = MazeEnvironment(length=8, width=8, corridor=1.0, seed=60,
-                          control_cost=0.2,
+    num_episodes_stage2 = 10000
+    log_interval = num_episodes_stage2 // 100
+    save_interval = num_episodes_stage2 // 10
+
+    lr_fast = 3e-4
+    lr_controller = 1e-3
+    gamma = 0.99
+
+    control_cost = 0.15
+    conflict_alpha = 0.05
+    lambda_beta = 2.0
+    w_long = 0.8
+    w_short = 1 - w_long
+
+
+
+    maze = MazeGraph(length=length, width=width, corridor=corridor, seed=seed)
+    env = MazeEnvironment(length=length, width=width, corridor=corridor, seed=seed,
+                          control_cost=control_cost,
                           fixed_start_node=fixed_start_node,
                           goal_is_deadend=goal_is_deadend)
 
@@ -912,8 +958,11 @@ if __name__ == "__main__":
         num_nodes=env.num_nodes,
         num_actions=env.num_actions,
         maze_graph=maze.get_graph(),
-        control_cost=0.2,
-        conflict_alpha=0.05
+        control_cost=control_cost,
+        conflict_alpha=conflict_alpha,
+        lambda_beta=lambda_beta,
+        w_long=w_long,
+        w_short=w_short
     )
 
     print(f"Agent created")
@@ -931,19 +980,59 @@ if __name__ == "__main__":
     # plot_stage1_curves(stage1_metrics, save_path=f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}/stage1_training.png')
 
     # Stage 2: Train with slow and controller
-    stage2_trainer = Stage2Trainer(env, agent, lr_slow=3e-4, lr_controller=1e-3)
-    stage2_metrics = stage2_trainer.train(num_episodes=10000, log_interval=50)
+    save_dir = f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}'
+
+    # Prepare metadata
+    metadata = {
+        'timestamp': datetime.now().isoformat(),
+        'environment': {
+            'length': length,
+            'width': width,
+            'corridor': corridor,
+            'seed': seed,
+            'num_nodes': env.num_nodes,
+            'num_actions': env.num_actions,
+            'num_deadends': len(env.deadend_nodes),
+            'fixed_start_node': list(fixed_start_node) if fixed_start_node else None,
+            'goal_is_deadend': goal_is_deadend,
+        },
+        'training': {
+            'num_episodes_stage2': num_episodes_stage2,
+            'log_interval': log_interval,
+            'save_interval': save_interval,
+            'lr_fast': lr_fast,
+            'lr_controller': lr_controller,
+            'gamma': gamma,
+        },
+        'agent': {
+            'control_cost': control_cost,
+            'conflict_alpha': conflict_alpha,
+            'lambda_beta': lambda_beta,
+            'w_long': w_long,
+            'w_short': w_short,
+        },
+        'architecture': {
+            'fast_hidden_dim': agent.fast_network.hidden_dim,
+            'fast_embedding_dim': agent.fast_network.embedding_dim,
+            'controller_hidden_dim': agent.controller.hidden_dim,
+            'controller_embedding_dim': agent.controller.embedding_dim,
+        }
+    }
+
+    stage2_trainer = Stage2Trainer(env, agent, lr_fast=lr_fast, lr_controller=lr_controller, gamma=gamma)
+    stage2_metrics = stage2_trainer.train(num_episodes=num_episodes_stage2, log_interval=log_interval,
+                                         save_interval=save_interval, save_dir=save_dir, metadata=metadata)
 
     # Save final agent
-    os.makedirs(f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}', exist_ok=True)
-    agent.save(f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}/agent_final.pt')
+    os.makedirs(save_dir, exist_ok=True)
+    agent.save(f'{save_dir}/agent_final.pt')
     print("\nFinal checkpoint saved")
 
     # Plot Stage 2 results
-    plot_stage2_curves(stage2_metrics, save_path=f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}/stage2_training.png')
+    plot_stage2_curves(stage2_metrics, save_path=f'{save_dir}/stage2_training.png')
 
     # Plot conflict map heatmap
-    plot_conflict_map_heatmap(agent, maze, save_path=f'checkpoints/{maze.length}x{maze.width}_corridor_{maze.corridor}_seed_{maze.seed}_start_{fixed_start_node[0]}_{fixed_start_node[1]}/conflict_map_heatmap.png')
+    plot_conflict_map_heatmap(agent, maze, save_path=f'{save_dir}/conflict_map_heatmap.png')
 
     # Print final statistics
     print("\n" + "=" * 70)

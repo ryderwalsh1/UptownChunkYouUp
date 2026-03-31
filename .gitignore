@@ -23,3 +23,6 @@ legacy/
 
 # checkpoints
 checkpoints/
+
+# videos
+trajectory\ videos/
