@@ -100,6 +100,7 @@ import matplotlib.animation as animation
 import matplotlib.colors as mcolors
 from matplotlib.patches import Rectangle
 import warnings
+import heapq
 
 
 def format_policy_distribution(logits, top_k=5, action_names=None):
@@ -127,6 +128,110 @@ def format_prospection_distribution(logits, env, top_k=5):
         node_pos = env.idx_to_node[idx]
         lines.append(f"    Node {idx} {node_pos}: {probs[idx]:.4f}")
     return "\n".join(lines)
+
+
+def identify_chunk_region(prospection_probs, current_pos, env,
+                         relative_threshold=0.5, density_drop_tolerance=0.9,
+                         absolute_min=0.01, max_mass_cap=0.95):
+    """
+    Identify contiguous chunk region using adaptive marginal continuation rules.
+
+    Grows a connected corridor from the agent's current position by greedily
+    adding adjacent nodes with highest prospection probability. Uses adaptive
+    stopping criteria that respond to local corridor structure rather than
+    fixed mass targets.
+
+    Stopping rules (ALL must pass for a node to be added):
+    1. Relative threshold: prob >= relative_threshold * corridor_mean
+    2. Density preservation: new_density >= old_density * density_drop_tolerance
+    3. Absolute minimum: prob >= absolute_min
+    4. Secondary mass cap: total_mass < max_mass_cap (safety ceiling)
+
+    Parameters:
+    -----------
+    prospection_probs : numpy.ndarray
+        Prospection probability distribution over all nodes (shape: [num_nodes])
+    current_pos : tuple
+        Agent's current position (row, col)
+    env : MazeEnvironment
+        Environment containing the maze graph
+    relative_threshold : float
+        Minimum probability as fraction of current corridor mean (default: 0.3)
+    density_drop_tolerance : float
+        Maximum allowed density drop when adding a node (default: 0.85 = 15% drop)
+    absolute_min : float
+        Absolute minimum probability threshold (default: 0.01)
+    max_mass_cap : float
+        Safety ceiling on cumulative mass (default: 0.95)
+
+    Returns:
+    --------
+    chunk_nodes : set
+        Set of node positions (row, col) that form the chunk corridor
+    """
+    # Get current node index
+    current_idx = env.node_to_idx[current_pos]
+
+    # Initialize chunk with current node
+    chunk_nodes = {current_pos}
+    chunk_indices = {current_idx}
+    accumulated_mass = prospection_probs[current_idx]
+
+    # Priority queue: (-probability, node_idx, node_pos)
+    # Use negative probability for max-heap behavior
+    priority_queue = []
+    visited = set(chunk_indices)
+
+    # Add neighbors of current node to queue
+    for neighbor_pos in env.graph.neighbors(current_pos):
+        neighbor_idx = env.node_to_idx[neighbor_pos]
+        if neighbor_idx not in visited:
+            heapq.heappush(priority_queue,
+                          (-prospection_probs[neighbor_idx], neighbor_idx, neighbor_pos))
+            visited.add(neighbor_idx)
+
+    # Greedily expand corridor using adaptive continuation rules
+    while priority_queue:
+        neg_prob, node_idx, node_pos = heapq.heappop(priority_queue)
+        prob = -neg_prob
+
+        # Compute current corridor statistics
+        corridor_size = len(chunk_nodes)
+        corridor_mean = accumulated_mass / corridor_size
+        corridor_density = accumulated_mass / corridor_size
+
+        # Test 1: Relative threshold - prob must be reasonable fraction of corridor mean
+        if prob < relative_threshold * corridor_mean:
+            continue
+
+        # Test 2: Absolute minimum - prob must exceed noise floor
+        if prob < absolute_min:
+            continue
+
+        # Test 3: Density preservation - adding this node shouldn't dilute corridor too much
+        new_density = (accumulated_mass + prob) / (corridor_size + 1)
+        if new_density < corridor_density * density_drop_tolerance:
+            continue
+
+        # Test 4: Safety ceiling - don't exceed maximum cumulative mass
+        total_mass = np.sum(prospection_probs)
+        if accumulated_mass / total_mass >= max_mass_cap:
+            break
+
+        # All tests passed - add this node to corridor
+        chunk_nodes.add(node_pos)
+        chunk_indices.add(node_idx)
+        accumulated_mass += prob
+
+        # Add neighbors of this newly added node
+        for neighbor_pos in env.graph.neighbors(node_pos):
+            neighbor_idx = env.node_to_idx[neighbor_pos]
+            if neighbor_idx not in visited:
+                heapq.heappush(priority_queue,
+                              (-prospection_probs[neighbor_idx], neighbor_idx, neighbor_pos))
+                visited.add(neighbor_idx)
+
+    return chunk_nodes
 
 
 def simulate_trajectory(agent, env, start_pos, goal_pos, max_steps=100):
@@ -244,6 +349,9 @@ def render_frame(env, agent_pos, goal_pos, prospection_probs, used_slow,
     node_positions = {(r, c): (c + 0.5, r + 0.5)
                       for r in range(env.length) for c in range(env.width)}
 
+    # Identify chunk region based on prospection probabilities
+    chunk_nodes = identify_chunk_region(prospection_probs, agent_pos, env)
+
     # Draw edges (maze structure)
     for edge in env.graph.edges():
         node1, node2 = edge
@@ -263,8 +371,13 @@ def render_frame(env, agent_pos, goal_pos, prospection_probs, used_slow,
 
         if node not in [agent_pos, goal_pos]:
             color = cmap(norm(prob))
-            ax.scatter(x, y, s=200, c=[color], alpha=0.8,
-                       edgecolors='white', linewidths=1.5, zorder=2)
+            # Use bold outline for chunk nodes
+            if node in chunk_nodes:
+                ax.scatter(x, y, s=200, c=[color], alpha=0.8,
+                           edgecolors='black', linewidths=4, zorder=2)
+            else:
+                ax.scatter(x, y, s=200, c=[color], alpha=0.8,
+                           edgecolors='white', linewidths=1.5, zorder=2)
 
     # Draw goal position
     gx, gy = node_positions[goal_pos]
