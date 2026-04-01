@@ -20,6 +20,15 @@ from maze_env import MazeEnvironment
 from fast import FastNetwork, FastNetworkTrainer
 from lambda_experiment.topology_generators import ALL_TOPOLOGIES, generate_topology
 from lambda_experiment.topology_metrics import compute_all_metrics
+from lambda_experiment.credit_diagnostics import compute_all_credit_diagnostics
+from lambda_experiment.evaluation_metrics import (
+    compute_auc, compute_episodes_to_threshold, compute_steps_to_threshold,
+    compute_timeout_rate, compute_junction_decision_accuracy,
+    compute_junction_action_entropy, compute_junction_policy_margin,
+    compute_wrong_turn_rate
+)
+import networkx as nx
+import torch.nn.functional as F
 
 
 class LambdaExperiment:
@@ -155,12 +164,22 @@ class LambdaExperiment:
                 'hiddens': [],
                 'next_state': None,
                 'next_goal': None,
+                'node_sequence': [],  # For credit diagnostics
+                'action_probs': [],   # For junction metrics
             }
 
             episode_reward = 0.0
             episode_length = 0
             success = False
             max_steps = env.max_steps
+
+            # Get shortest path for junction metrics
+            start_node = state['current_pos']
+            goal_node = state['goal_pos']
+            if nx.has_path(graph, start_node, goal_node):
+                shortest_path = nx.shortest_path(graph, start_node, goal_node)
+            else:
+                shortest_path = []
 
             for step in range(max_steps):
                 # Get state encoding
@@ -175,6 +194,9 @@ class LambdaExperiment:
                 # Sample action
                 action, log_prob = network.sample_action(action_logits)
 
+                # Compute action probabilities for junction metrics
+                action_probs = F.softmax(action_logits, dim=-1).squeeze().detach().cpu().numpy()
+
                 # Store trajectory data
                 trajectory['states'].append(torch.tensor(state['current_encoding']))
                 trajectory['goals'].append(torch.tensor(state['goal_encoding']))
@@ -182,6 +204,8 @@ class LambdaExperiment:
                 trajectory['log_probs'].append(log_prob)
                 trajectory['values'].append(value.squeeze())
                 trajectory['hiddens'].append(hidden)
+                trajectory['node_sequence'].append(state['current_pos'])
+                trajectory['action_probs'].append(action_probs)
 
                 # Take step
                 next_state, reward, done, info = env.step(action.item(), used_slow=False)
@@ -207,6 +231,43 @@ class LambdaExperiment:
 
             # Train on trajectory
             loss_dict = trainer.train_step(trajectory)
+
+            # Compute credit diagnostics (only on successful episodes for cleaner signal)
+            credit_diag = {}
+            if success and 'advantages' in loss_dict and 'td_errors' in loss_dict:
+                advantages = loss_dict['advantages']
+                td_errors = loss_dict['td_errors']
+                node_sequence = trajectory['node_sequence']
+
+                credit_diag = compute_all_credit_diagnostics(
+                    advantages=advantages,
+                    node_sequence=node_sequence,
+                    graph=graph,
+                    shortest_path=shortest_path,
+                    action_probs=trajectory['action_probs'],
+                    td_errors=td_errors
+                )
+
+            # Compute junction decision metrics
+            junction_metrics = {}
+            if len(shortest_path) > 0:
+                junction_acc = compute_junction_decision_accuracy(
+                    trajectory, graph, shortest_path
+                )
+                junction_metrics.update(junction_acc)
+
+                junction_entropy = compute_junction_action_entropy(
+                    trajectory, graph, trajectory['action_probs']
+                )
+                junction_metrics.update(junction_entropy)
+
+                junction_margin = compute_junction_policy_margin(
+                    trajectory, graph, trajectory['action_probs']
+                )
+                junction_metrics.update(junction_margin)
+
+                wrong_turn = compute_wrong_turn_rate(trajectory, graph, shortest_path)
+                junction_metrics['wrong_turn_rate'] = wrong_turn
 
             # Store episode results
             episode_result = {
@@ -241,6 +302,34 @@ class LambdaExperiment:
                 'path_num_junction_nodes': path_metrics['num_junction_nodes_on_path'],
                 'path_corr_dec_ratio': path_metrics['corr_dec_ratio'],
             }
+
+            # Add credit diagnostics (if computed)
+            if credit_diag:
+                episode_result.update({
+                    'effective_credit_distance': credit_diag.get('effective_credit_distance', np.nan),
+                    'C_corridor': credit_diag.get('C_corridor', np.nan),
+                    'C_junction': credit_diag.get('C_junction', np.nan),
+                    'C_dead_end': credit_diag.get('C_dead_end', np.nan),
+                    'junction_corridor_ratio': credit_diag.get('junction_corridor_ratio', np.nan),
+                    'dead_corridor_ratio': credit_diag.get('dead_corridor_ratio', np.nan),
+                    'mean_decision_localization': credit_diag.get('mean_decision_localization', np.nan),
+                    'num_junctions_analyzed': credit_diag.get('num_junctions_analyzed', 0),
+                    'mean_junction_action_gap': credit_diag.get('mean_junction_action_gap', np.nan),
+                    'mean_upstream_local_ratio': credit_diag.get('mean_upstream_local_ratio', np.nan),
+                })
+
+            # Add junction decision metrics (if computed)
+            if junction_metrics:
+                episode_result.update({
+                    'num_junctions_visited': junction_metrics.get('num_junctions_visited', 0),
+                    'num_correct_junction_choices': junction_metrics.get('num_correct_junction_choices', 0),
+                    'junction_accuracy': junction_metrics.get('junction_accuracy', np.nan),
+                    'mean_junction_entropy': junction_metrics.get('mean_junction_entropy', np.nan),
+                    'mean_corridor_entropy': junction_metrics.get('mean_corridor_entropy', np.nan),
+                    'mean_junction_margin': junction_metrics.get('mean_junction_margin', np.nan),
+                    'mean_corridor_margin': junction_metrics.get('mean_corridor_margin', np.nan),
+                    'wrong_turn_rate': junction_metrics.get('wrong_turn_rate', np.nan),
+                })
 
             run_results.append(episode_result)
 
@@ -286,6 +375,76 @@ class LambdaExperiment:
         print(f"Results saved to: {self.output_dir}")
         print("=" * 80)
 
+        # Compute aggregate metrics
+        print("\nComputing aggregate metrics...")
+        self.compute_aggregate_metrics()
+        print("Aggregate metrics saved!")
+
+    def compute_aggregate_metrics(self, results_csv_path=None):
+        """
+        Compute aggregate metrics across episodes (AUC, thresholds, etc.).
+
+        Parameters:
+        -----------
+        results_csv_path : str, optional
+            Path to saved results CSV. If provided, loads from file.
+            If None, uses self.results from current experiment run.
+        """
+        # Load data either from file or from current results
+        if results_csv_path is not None:
+            print(f"  Loading results from: {results_csv_path}")
+            df = pd.read_csv(results_csv_path)
+            print(f"  Loaded {len(df)} episodes")
+            # Use directory of CSV file for output
+            output_dir = os.path.dirname(results_csv_path)
+        else:
+            if len(self.results) == 0:
+                print("  No results to process!")
+                return
+            df = pd.DataFrame(self.results)
+            output_dir = self.output_dir
+
+        # Compute AUC for success rate
+        print("  - Computing AUC...")
+        auc_results = compute_auc(df, metric='success', x_axis='episode')
+        auc_file = os.path.join(output_dir, 'auc_results.csv')
+        auc_results.to_csv(auc_file, index=False)
+
+        # Compute episodes to threshold
+        print("  - Computing episodes to threshold...")
+        episodes_threshold = compute_episodes_to_threshold(df)
+        episodes_file = os.path.join(output_dir, 'episodes_to_threshold.csv')
+        episodes_threshold.to_csv(episodes_file, index=False)
+
+        # Compute steps to threshold
+        print("  - Computing steps to threshold...")
+        steps_threshold = compute_steps_to_threshold(df)
+        steps_file = os.path.join(output_dir, 'steps_to_threshold.csv')
+        steps_threshold.to_csv(steps_file, index=False)
+
+        # Compute timeout rate
+        print("  - Computing timeout rate...")
+        timeout_results = compute_timeout_rate(df)
+        timeout_file = os.path.join(output_dir, 'timeout_rate.csv')
+        timeout_results.to_csv(timeout_file, index=False)
+
+        # Compute summary statistics per condition
+        print("  - Computing summary statistics...")
+        summary = df.groupby(['topology', 'lambda', 'seed']).agg({
+            'success': 'mean',
+            'episode_reward': 'mean',
+            'episode_length': 'mean',
+            'optimality_ratio': 'mean',
+            'junction_accuracy': 'mean',
+            'junction_corridor_ratio': 'mean',
+            'effective_credit_distance': 'mean',
+            'mean_decision_localization': 'mean',
+            'wrong_turn_rate': 'mean',
+        }).reset_index()
+
+        summary_file = os.path.join(output_dir, 'summary_statistics.csv')
+        summary.to_csv(summary_file, index=False)
+
     def save_results(self):
         """
         Save results to CSV file.
@@ -300,10 +459,52 @@ class LambdaExperiment:
             json.dump(self.config, f, indent=2)
 
 
+def compute_metrics_from_csv(csv_path):
+    """
+    Standalone function to compute aggregate metrics from a saved CSV file.
+
+    This can be called from another script or interactively.
+
+    Parameters:
+    -----------
+    csv_path : str
+        Path to results.csv file
+
+    Example:
+    --------
+    >>> from lambda_experiment import compute_metrics_from_csv
+    >>> compute_metrics_from_csv('lambda_experiment_results_20260331_211814/results.csv')
+    """
+    # Create a minimal experiment object just to use its compute_aggregate_metrics method
+    dummy_config = {
+        'lambda_values': [],
+        'seeds': [],
+        'num_episodes': 0,
+        'topologies': [],
+        'output_dir': '.'
+    }
+    exp = LambdaExperiment(dummy_config)
+    exp.compute_aggregate_metrics(results_csv_path=csv_path)
+
+
 def main():
     """
     Main entry point for lambda experiment.
     """
+    import sys
+
+    # Check if running in analysis mode (computing metrics from existing CSV)
+    if len(sys.argv) > 1 and sys.argv[1] == '--compute-metrics':
+        if len(sys.argv) < 3:
+            print("Usage: python lambda_experiment.py --compute-metrics <path_to_results.csv>")
+            sys.exit(1)
+        csv_path = sys.argv[2]
+        print("=" * 80)
+        print("Computing aggregate metrics from saved results")
+        print("=" * 80)
+        compute_metrics_from_csv(csv_path)
+        return
+
     # Experiment configuration
     config = {
         'lambda_values': [0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0],  # Coarse sweep

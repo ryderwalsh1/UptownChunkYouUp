@@ -339,6 +339,8 @@ class FastNetworkTrainer:
             Advantage estimates [T]
         returns : torch.Tensor
             Return estimates [T]
+        td_errors : torch.Tensor
+            TD residuals δ_t [T] (for credit diagnostics)
         """
         if gamma is None:
             gamma = self.gamma
@@ -346,6 +348,7 @@ class FastNetworkTrainer:
             lambda_ = self.lambda_
 
         advantages = []
+        td_errors = []
         gae = 0
         T = len(rewards)
 
@@ -372,11 +375,13 @@ class FastNetworkTrainer:
                 gae = delta + gamma * lambda_ * gae
 
             advantages.insert(0, gae)
+            td_errors.insert(0, delta)
 
         advantages = torch.tensor(advantages, dtype=torch.float32)
+        td_errors = torch.tensor(td_errors, dtype=torch.float32)
         returns = advantages + values
 
-        return advantages, returns
+        return advantages, returns, td_errors
 
     def train_step(self, trajectory):
         """
@@ -422,7 +427,7 @@ class FastNetworkTrainer:
             next_value = next_value.squeeze()
 
         # Compute advantages and returns using GAE
-        advantages, returns = self.compute_gae(rewards, old_values, dones, next_value)
+        advantages, returns, td_errors = self.compute_gae(rewards, old_values, dones, next_value)
 
         # Normalize advantages (only if we have more than 1 sample)
         if len(advantages) > 1:
@@ -451,7 +456,11 @@ class FastNetworkTrainer:
             entropies_list.append(self.network.compute_entropy(action_logits))
 
         action_logits = torch.cat(action_logits_list, dim=0)
-        prospection_logits = torch.cat(prospection_logits_list, dim=0)
+        # Only concatenate prospection logits if network has prospection head
+        if self.network.has_prospection_head and prospection_logits_list[0] is not None:
+            prospection_logits = torch.cat(prospection_logits_list, dim=0)
+        else:
+            prospection_logits = None
         values = torch.stack(values_list)
         entropies = torch.stack(entropies_list)
 
@@ -481,7 +490,7 @@ class FastNetworkTrainer:
 
         # Prospection loss: auxiliary supervised loss on future-state predictions
         prospection_loss = torch.tensor(0.0)
-        if self.network.has_prospection_head and 'lambdas' in trajectory:
+        if self.network.has_prospection_head and prospection_logits is not None and 'lambdas' in trajectory:
             # Compute prospection targets using lambda-weighted future states
             prospection_targets = self.compute_prospection_targets(trajectory, trajectory['lambdas'])
             # Cross-entropy loss between prospection logits and soft targets
@@ -524,7 +533,10 @@ class FastNetworkTrainer:
             'teacher_loss': teacher_loss.item(),
             'prospection_loss': prospection_loss.item(),
             'mean_entropy': entropies.mean().item(),
-            'mean_value': values.mean().item()
+            'mean_value': values.mean().item(),
+            # Credit diagnostics
+            'advantages': advantages.detach().cpu().numpy(),
+            'td_errors': td_errors.detach().cpu().numpy()
         }
 
 
