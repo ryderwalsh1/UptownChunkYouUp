@@ -507,18 +507,22 @@ def main():
 
     # Experiment configuration
     config = {
-        'lambda_values': [0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0],  # Coarse sweep
-        'seeds': [42, 43, 44],  # 3 seeds
-        'num_episodes': 300,  # Short training for initial tests
+        'lambda_values': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        'seeds': [101,110,120,160,180],  # 5 seeds
+        'num_episodes': 1500,
         'topologies': [
-            # Elementary topologies (Family A: corridors)
-            'corridor_short',
-            'corridor_medium',
-            'corridor_long',
             # Procedural topologies (Family D)
-            'proc_junction_heavy',
-            'proc_mixed',
-            'proc_corridor_heavy',
+            'maze_0.0',
+            'maze_0.1',
+            'maze_0.2',
+            'maze_0.3',
+            'maze_0.4',
+            'maze_0.5',
+            'maze_0.6',
+            'maze_0.7',
+            'maze_0.8',
+            'maze_0.9',
+            'maze_1.0'
         ],
         'lr': 3e-4,
         'gamma': 0.99,

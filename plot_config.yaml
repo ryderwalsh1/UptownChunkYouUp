@@ -1,0 +1,69 @@
+# Configuration for Lambda Experiment Plotting
+# This file allows you to customize which figures are generated and their parameters
+
+# Figure selection
+# Set to 'all' or list specific categories: [learning, heatmaps, optimal_lambda, credit, decision_quality, topology, diagnostics]
+figures: all
+
+# Output settings
+output_dir: figures
+figure_formats:
+  - png
+  - pdf
+
+# Plot styling
+style:
+  dpi: 300
+  figure_width: 15
+  figure_height: 8
+  font_size: 11
+  title_size: 14
+
+# Color schemes
+colors:
+  lambda_colormap: viridis  # For lambda values
+  topology_palette: Set2     # For topology types
+
+# Analysis parameters
+analysis:
+  # Which metrics to use for optimal lambda determination
+  optimal_lambda_metric: auc  # Options: auc, final_success, steps_to_threshold
+
+  # Confidence interval level (0-1)
+  confidence_level: 0.95
+
+  # For computing "final" performance, use last N episodes
+  final_episodes_window: 50
+
+  # Minimum number of successful episodes required to compute credit diagnostics
+  min_success_episodes: 5
+
+# Figure-specific settings
+learning_curves:
+  smoothing_window: 10  # Rolling average window for smoothing curves
+  show_individual_seeds: false
+
+heatmaps:
+  annotate_values: true
+  colormap: RdYlGn
+
+optimal_lambda:
+  show_regression_stats: true
+  bootstrap_ci: false  # Whether to compute bootstrap confidence intervals (slower)
+  n_bootstrap: 1000
+
+credit_diagnostics:
+  # Only analyze successful episodes
+  success_only: true
+
+decision_quality:
+  # Threshold for "good" junction accuracy
+  junction_accuracy_threshold: 0.8
+
+topology:
+  show_correlation_matrix: true
+
+diagnostics:
+  # Which topology and lambda to show detailed traces for
+  representative_topology: null  # null = auto-select first
+  representative_lambda: null    # null = auto-select middle value

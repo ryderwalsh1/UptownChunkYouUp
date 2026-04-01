@@ -113,22 +113,30 @@ def make_intersection(num_arms, arm_length, seed=None):
 
 
 # Configuration for elementary topologies
-ELEMENTARY_TOPOLOGIES = {
-    'corridor_short': {'type': 'corridor', 'length': 5},
-    'corridor_medium': {'type': 'corridor', 'length': 10},
-    'corridor_long': {'type': 'corridor', 'length': 15},
-    'corridor_verylong': {'type': 'corridor', 'length': 20},
-}
+# ELEMENTARY_TOPOLOGIES = {
+#     'corridor_short': {'type': 'corridor', 'length': 5},
+#     'corridor_medium': {'type': 'corridor', 'length': 10},
+#     'corridor_long': {'type': 'corridor', 'length': 15},
+#     'corridor_verylong': {'type': 'corridor', 'length': 20},
+# }
 
 # Configuration for procedural topologies
 PROCEDURAL_TOPOLOGIES = {
-    'proc_junction_heavy': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.0},
-    'proc_mixed': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.5},
-    'proc_corridor_heavy': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.9},
+    'maze_0.0': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.0},
+    'maze_0.1': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.1},
+    'maze_0.2': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.2},
+    'maze_0.3': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.3},
+    'maze_0.4': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.4},
+    'maze_0.5': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.5},
+    'maze_0.6': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.6},
+    'maze_0.7': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.7},
+    'maze_0.8': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.8},
+    'maze_0.9': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.9},
+    'maze_1.0': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 1.0},
 }
 
 # Combined topology catalog
-ALL_TOPOLOGIES = {**ELEMENTARY_TOPOLOGIES, **PROCEDURAL_TOPOLOGIES}
+ALL_TOPOLOGIES = {**PROCEDURAL_TOPOLOGIES}
 
 
 def generate_topology(topology_config, seed=None):
