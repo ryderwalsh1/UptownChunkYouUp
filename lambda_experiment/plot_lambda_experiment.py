@@ -37,7 +37,7 @@ TOPOLOGY_COLORS = sns.color_palette("Set2", 8)
 class LambdaExperimentPlotter:
     """Main plotting class for lambda experiment analysis."""
 
-    def __init__(self, results_dir, output_dir='figures'):
+    def __init__(self, results_dir, output_dir='figures', learning_curve_window=200):
         """
         Initialize plotter with results directory.
 
@@ -47,10 +47,13 @@ class LambdaExperimentPlotter:
             Directory containing results.csv and aggregate metrics
         output_dir : str or Path
             Directory to save generated figures
+        learning_curve_window : int
+            Window size for running-average smoothing in learning curves
         """
         self.results_dir = Path(results_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
+        self.learning_curve_window = learning_curve_window
 
         # Load all data
         print(f"Loading data from {self.results_dir}...")
@@ -66,6 +69,12 @@ class LambdaExperimentPlotter:
         print(f"  Topologies: {sorted(self.df['topology'].unique())}")
         print(f"  Lambda values: {sorted(self.df['lambda'].unique())}")
         print(f"  Seeds: {sorted(self.df['seed'].unique())}")
+
+    def _running_average(self, series, window=None):
+        """Compute running average with a centered rolling window."""
+        if window is None:
+            window = self.learning_curve_window
+        return series.rolling(window=window, min_periods=1, center=True).mean()
 
     def _load_config(self):
         """Load experiment config if available."""
@@ -156,11 +165,12 @@ class LambdaExperimentPlotter:
     # =========================================================================
 
     def plot_learning_dynamics(self):
-        """Plot learning curves across λ for each topology."""
+        """Plot smoothed learning curves across λ for each topology."""
         subdir = 'learning'
 
         topologies = sorted(self.df['topology'].unique())
         lambda_values = sorted(self.df['lambda'].unique())
+        window = self.learning_curve_window
 
         # 1. Success rate learning curves
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))
@@ -173,30 +183,29 @@ class LambdaExperimentPlotter:
             for lambda_idx, lambda_val in enumerate(lambda_values):
                 lambda_data = topo_data[topo_data['lambda'] == lambda_val]
 
-                # Compute mean and std across seeds
                 grouped = lambda_data.groupby('episode')['success'].agg(['mean', 'std', 'count'])
-                episodes = grouped.index
+                episodes = grouped.index.to_numpy()
                 mean = grouped['mean']
-                std = grouped['std']
+                std = grouped['std'].fillna(0)
                 n = grouped['count']
-
-                # Confidence interval
                 ci = 1.96 * std / np.sqrt(n)
 
+                mean_smooth = self._running_average(mean, window)
+                ci_smooth = self._running_average(ci, window)
+
                 color = LAMBDA_COLORS[lambda_idx % len(LAMBDA_COLORS)]
-                ax.plot(episodes, mean, label=f'λ={lambda_val:.1f}',
-                       color=color, linewidth=1.5, alpha=0.8)
-                ax.fill_between(episodes, mean - ci, mean + ci,
-                               color=color, alpha=0.15)
+                ax.plot(episodes, mean_smooth, label=f'λ={lambda_val:.1f}',
+                        color=color, linewidth=1.5, alpha=0.8)
+                ax.fill_between(episodes, mean_smooth - ci_smooth, mean_smooth + ci_smooth,
+                                color=color, alpha=0.15)
 
             ax.set_xlabel('Episode')
-            ax.set_ylabel('Success Rate')
+            ax.set_ylabel(f'Success Rate\n({window}-ep running avg)')
             ax.set_title(topology.replace('_', ' ').title())
             ax.grid(alpha=0.3, linewidth=0.5)
             ax.legend(ncol=2, fontsize=8)
             ax.set_ylim(-0.05, 1.05)
 
-        # Remove extra subplots if needed
         for idx in range(len(topologies), len(axes)):
             fig.delaxes(axes[idx])
 
@@ -216,20 +225,23 @@ class LambdaExperimentPlotter:
                 lambda_data = topo_data[topo_data['lambda'] == lambda_val]
 
                 grouped = lambda_data.groupby('episode')['episode_reward'].agg(['mean', 'std', 'count'])
-                episodes = grouped.index
+                episodes = grouped.index.to_numpy()
                 mean = grouped['mean']
-                std = grouped['std']
+                std = grouped['std'].fillna(0)
                 n = grouped['count']
                 ci = 1.96 * std / np.sqrt(n)
 
+                mean_smooth = self._running_average(mean, window)
+                ci_smooth = self._running_average(ci, window)
+
                 color = LAMBDA_COLORS[lambda_idx % len(LAMBDA_COLORS)]
-                ax.plot(episodes, mean, label=f'λ={lambda_val:.1f}',
-                       color=color, linewidth=1.5, alpha=0.8)
-                ax.fill_between(episodes, mean - ci, mean + ci,
-                               color=color, alpha=0.15)
+                ax.plot(episodes, mean_smooth, label=f'λ={lambda_val:.1f}',
+                        color=color, linewidth=1.5, alpha=0.8)
+                ax.fill_between(episodes, mean_smooth - ci_smooth, mean_smooth + ci_smooth,
+                                color=color, alpha=0.15)
 
             ax.set_xlabel('Episode')
-            ax.set_ylabel('Episode Reward')
+            ax.set_ylabel(f'Episode Reward\n({window}-ep running avg)')
             ax.set_title(topology.replace('_', ' ').title())
             ax.grid(alpha=0.3, linewidth=0.5)
             ax.legend(ncol=2, fontsize=8)
@@ -251,7 +263,7 @@ class LambdaExperimentPlotter:
 
             if len(topo_data) == 0:
                 ax.text(0.5, 0.5, 'No successful episodes',
-                       ha='center', va='center', transform=ax.transAxes)
+                        ha='center', va='center', transform=ax.transAxes)
                 ax.set_title(topology.replace('_', ' ').title())
                 continue
 
@@ -262,20 +274,23 @@ class LambdaExperimentPlotter:
                     continue
 
                 grouped = lambda_data.groupby('episode')['optimality_ratio'].agg(['mean', 'std', 'count'])
-                episodes = grouped.index
+                episodes = grouped.index.to_numpy()
                 mean = grouped['mean']
-                std = grouped['std']
+                std = grouped['std'].fillna(0)
                 n = grouped['count']
                 ci = 1.96 * std / np.sqrt(n)
 
+                mean_smooth = self._running_average(mean, window)
+                ci_smooth = self._running_average(ci, window)
+
                 color = LAMBDA_COLORS[lambda_idx % len(LAMBDA_COLORS)]
-                ax.plot(episodes, mean, label=f'λ={lambda_val:.1f}',
-                       color=color, linewidth=1.5, alpha=0.8)
-                ax.fill_between(episodes, mean - ci, mean + ci,
-                               color=color, alpha=0.15)
+                ax.plot(episodes, mean_smooth, label=f'λ={lambda_val:.1f}',
+                        color=color, linewidth=1.5, alpha=0.8)
+                ax.fill_between(episodes, mean_smooth - ci_smooth, mean_smooth + ci_smooth,
+                                color=color, alpha=0.15)
 
             ax.set_xlabel('Episode')
-            ax.set_ylabel('Optimality Ratio\n(path length / optimal)')
+            ax.set_ylabel(f'Optimality Ratio\n({window}-ep running avg)')
             ax.set_title(topology.replace('_', ' ').title())
             ax.grid(alpha=0.3, linewidth=0.5)
             ax.axhline(y=1.0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Optimal')

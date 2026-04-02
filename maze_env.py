@@ -72,7 +72,10 @@ class MazeEnvironment:
         self.current_pos = None
         self.goal_pos = None
         self.step_count = 0
-        self.max_steps = self.num_nodes * 2  # Maximum episode length
+        self.max_steps = self.num_nodes * 4  # Maximum episode length
+
+        # Cached distances (for reward shaping efficiency)
+        self._distance_cache = {}
 
         # Statistics
         self.total_control_cost = 0.0
@@ -135,6 +138,12 @@ class MazeEnvironment:
         self.total_control_cost = 0.0
         self.used_slow_count = 0
 
+        # Precompute all distances from goal for reward shaping
+        self._distance_cache = {}
+        if nx.has_path(self.graph, self.goal_pos, self.goal_pos):
+            # Use single-source shortest path from goal
+            self._distance_cache = nx.single_source_shortest_path_length(self.graph, self.goal_pos)
+
         return self._get_state()
 
     def _get_state(self):
@@ -195,6 +204,9 @@ class MazeEnvironment:
         invalid_move = False
         old_pos = self.current_pos
 
+        # Get distance to goal before move (for reward shaping, using cache)
+        old_distance = self._distance_cache.get(old_pos, -1)
+
         # Handle IDENTIFY_GOAL action
         if action == self.IDENTIFY_GOAL:
             if self.current_pos == self.goal_pos:
@@ -233,6 +245,15 @@ class MazeEnvironment:
 
         self.step_count += 1
 
+        # Add reward shaping: bonus for getting closer to goal
+        # This provides intermediate learning signal
+        if not done and not invalid_move:
+            new_distance = self._distance_cache.get(self.current_pos, -1)
+            if old_distance != -1 and new_distance != -1:
+                # Positive reward if we got closer, negative if we got farther
+                distance_delta = old_distance - new_distance
+                reward += 0.05 * distance_delta  # Small bonus/penalty for progress
+
         # Control cost
         if used_slow:
             reward -= self.control_cost
@@ -242,7 +263,7 @@ class MazeEnvironment:
         # Timeout
         if self.step_count >= self.max_steps:
             done = True
-            reward -= 5.0  # Penalty for timeout
+            reward -= 1.0  # Penalty for timeout
 
         info = {
             'invalid_move': invalid_move,

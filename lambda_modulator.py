@@ -11,7 +11,7 @@ import torch
 
 
 class LambdaModulator:
-    def __init__(self, beta=2.0, w_long=0.8, w_short=0.2, lambda_min=0.05, lambda_max=0.99):
+    def __init__(self, beta=2.0, w_long=0.8, w_short=0.2, lambda_min=0.05, lambda_max=0.99, fixed_lambda=None):
         """
         Initialize lambda modulator.
 
@@ -28,8 +28,10 @@ class LambdaModulator:
             Minimum lambda value
         lambda_max : float
             Maximum lambda value
+        fixed_lambda : float, optional
+            If provided, always returns this lambda value (disables modulation)
         """
-        if beta <= 1.0:
+        if fixed_lambda is None and beta <= 1.0:
             raise ValueError("beta must be > 1 for superlinear mapping")
 
         if w_long + w_short != 1.0:
@@ -43,6 +45,7 @@ class LambdaModulator:
         self.w_short = w_short
         self.lambda_min = lambda_min
         self.lambda_max = lambda_max
+        self.fixed_lambda = fixed_lambda
 
     def compute_lambda(self, conflict_map_value, p_slow):
         """
@@ -53,6 +56,8 @@ class LambdaModulator:
         lambda_t = (1 - d_t)^beta
 
         where d_t is control demand in [0, 1].
+
+        If fixed_lambda is set, returns that value instead.
 
         Parameters:
         -----------
@@ -66,6 +71,10 @@ class LambdaModulator:
         lambda_val : float or torch.Tensor or np.ndarray
             Lambda value for eligibility traces
         """
+        # If fixed lambda is set, return it immediately
+        if self.fixed_lambda is not None:
+            return self.fixed_lambda
+
         # Handle different input types
         is_tensor = isinstance(conflict_map_value, torch.Tensor) or isinstance(p_slow, torch.Tensor)
         is_array = isinstance(conflict_map_value, np.ndarray) or isinstance(p_slow, np.ndarray)

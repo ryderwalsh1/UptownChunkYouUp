@@ -19,7 +19,7 @@ class CognitiveAgent:
                  embedding_dim=64, hidden_dim=128,
                  conflict_alpha=0.01, lambda_beta=2.0,
                  w_long=0.8, w_short=0.2,
-                 control_cost=0.01):
+                 control_cost=0.01, fixed_lambda=None):
         """
         Initialize cognitive agent.
 
@@ -45,6 +45,8 @@ class CognitiveAgent:
             Weight for short-term signal in lambda
         control_cost : float
             Cost penalty for using slow processing
+        fixed_lambda : float, optional
+            If provided, lambda modulator always returns this value (disables modulation)
         """
         self.num_nodes = num_nodes
         self.num_actions = num_actions
@@ -63,7 +65,7 @@ class CognitiveAgent:
         self.conflict_map = ConflictMap(num_nodes, alpha=conflict_alpha)
 
         # Create lambda modulator
-        self.lambda_modulator = LambdaModulator(beta=lambda_beta, w_long=w_long, w_short=w_short)
+        self.lambda_modulator = LambdaModulator(beta=lambda_beta, w_long=w_long, w_short=w_short, fixed_lambda=fixed_lambda)
 
         # Hidden state for fast network
         self.fast_hidden = None
@@ -263,7 +265,8 @@ class CognitiveAgent:
             'lambda_modulator': {
                 'beta': self.lambda_modulator.beta,
                 'w_long': self.lambda_modulator.w_long,
-                'w_short': self.lambda_modulator.w_short
+                'w_short': self.lambda_modulator.w_short,
+                'fixed_lambda': self.lambda_modulator.fixed_lambda
             },
             'stats': self.stats
         }, filepath)
@@ -290,6 +293,7 @@ class CognitiveAgent:
         self.lambda_modulator.beta = checkpoint['lambda_modulator']['beta']
         self.lambda_modulator.w_long = checkpoint['lambda_modulator']['w_long']
         self.lambda_modulator.w_short = checkpoint['lambda_modulator']['w_short']
+        self.lambda_modulator.fixed_lambda = checkpoint['lambda_modulator'].get('fixed_lambda', None)
 
         self.stats = checkpoint['stats']
 

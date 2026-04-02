@@ -122,17 +122,13 @@ def make_intersection(num_arms, arm_length, seed=None):
 
 # Configuration for procedural topologies
 PROCEDURAL_TOPOLOGIES = {
-    'maze_0.0': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.0},
-    'maze_0.1': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.1},
-    'maze_0.2': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.2},
-    'maze_0.3': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.3},
-    'maze_0.4': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.4},
-    'maze_0.5': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.5},
-    'maze_0.6': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.6},
-    'maze_0.7': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.7},
-    'maze_0.8': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.8},
-    'maze_0.9': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 0.9},
-    'maze_1.0': {'type': 'procedural', 'length': 5, 'width': 5, 'corridor': 1.0},
+    '0.0 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.0},
+    '0.2 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.2},
+    '0.3 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.3},
+    '0.4 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.4},
+    '0.6 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.6},
+    '0.9 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.9},
+    '1.0 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 1.0},
 }
 
 # Combined topology catalog
@@ -191,10 +187,10 @@ if __name__ == "__main__":
 
     # Test corridor
     print("\n1. Testing corridor topology:")
-    for name, config in ELEMENTARY_TOPOLOGIES.items():
-        maze = generate_topology(config, seed=42)
-        stats = maze.get_stats()
-        print(f"  {name}: {stats['total_nodes']} nodes, {stats['total_edges']} edges")
+    # for name, config in ELEMENTARY_TOPOLOGIES.items():
+    #     maze = generate_topology(config, seed=42)
+    #     stats = maze.get_stats()
+    #     print(f"  {name}: {stats['total_nodes']} nodes, {stats['total_edges']} edges")
 
     # Test procedural
     print("\n2. Testing procedural topology:")

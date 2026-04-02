@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from maze_env import MazeEnvironment
 from fast import FastNetwork, FastNetworkTrainer
+from slow import SlowMemory
 from lambda_experiment.topology_generators import ALL_TOPOLOGIES, generate_topology
 from lambda_experiment.topology_metrics import compute_all_metrics
 from lambda_experiment.credit_diagnostics import compute_all_credit_diagnostics
@@ -50,6 +51,9 @@ class LambdaExperiment:
             - gamma: discount factor
             - entropy_coef: entropy regularization coefficient
             - value_coef: value loss coefficient
+            - tau: threshold entropy for memory consultation (default: 1.0)
+            - consultation_temperature: temperature for sigmoid gating (default: 2.0)
+            - hard_teacher_force: whether to correct wrong policy samples (default: True)
             - output_dir: directory for saving results
         """
         self.config = config
@@ -61,6 +65,11 @@ class LambdaExperiment:
         self.gamma = config.get('gamma', 0.99)
         self.entropy_coef = config.get('entropy_coef', 0.01)
         self.value_coef = config.get('value_coef', 0.5)
+        self.tau = config.get('tau', 1.0)
+        self.consultation_temperature = config.get('consultation_temperature', 2.0)
+        self.hard_teacher_force = config.get('hard_teacher_force', True)
+        self.memory_consultation_cost = config.get('memory_consultation_cost', 0.01)
+        self.memory_correction_cost = config.get('memory_correction_cost', 0.01)
         self.output_dir = config.get('output_dir', 'lambda_experiment_results')
 
         # Create output directory
@@ -106,8 +115,8 @@ class LambdaExperiment:
             corridor=maze.corridor,
             seed=seed,
             control_cost=0.0,  # No control cost for this experiment
-            fixed_start_node=None,  # Random start
-            goal_is_deadend=True  # Goals at dead-ends
+            fixed_start_node=(0,0),  # Random start
+            goal_is_deadend=False  # Goals at dead-ends
         )
         env.maze = maze  # Use the generated maze
         env.graph = graph
@@ -134,6 +143,13 @@ class LambdaExperiment:
             entropy_coef=self.entropy_coef,
             value_coef=self.value_coef
         )
+
+        # Create slow memory and initialize with optimal paths
+        slow_memory = SlowMemory(
+            num_nodes=env.num_nodes,
+            num_actions=env.num_actions
+        )
+        slow_memory.initialize_memory(maze)
 
         # Training loop
         run_results = []
@@ -166,6 +182,10 @@ class LambdaExperiment:
                 'next_goal': None,
                 'node_sequence': [],  # For credit diagnostics
                 'action_probs': [],   # For junction metrics
+                'used_slow': [],      # For teacher forcing
+                'policy_entropies': [],  # For tracking consultation behavior
+                'consulted_memory': [],  # Whether memory was consulted
+                'policy_corrected': [],  # Whether policy was corrected
             }
 
             episode_reward = 0.0
@@ -191,29 +211,87 @@ class LambdaExperiment:
                     state_encoding, goal_encoding, network.hidden
                 )
 
-                # Sample action
-                action, log_prob = network.sample_action(action_logits)
+                # Compute policy entropy
+                policy_entropy = network.compute_entropy(action_logits).item()
 
                 # Compute action probabilities for junction metrics
                 action_probs = F.softmax(action_logits, dim=-1).squeeze().detach().cpu().numpy()
 
+                # Entropy-gated memory consultation
+                # Probability of consulting memory: sigmoid((entropy - tau) / temperature)
+                consultation_logit = (policy_entropy - self.tau) / self.consultation_temperature
+                consultation_prob = torch.sigmoid(torch.tensor(consultation_logit)).item()
+                consult_memory = np.random.random() < consultation_prob
+
+                # Get optimal action from memory for potential use
+                state_idx = state_encoding.argmax().item()
+                goal_idx = goal_encoding.argmax().item()
+                memory_action = slow_memory.query(state_encoding, goal_encoding)
+                memory_action_idx = memory_action.argmax().item()
+
+                # Decide on action and whether to use teacher forcing
+                teacher_force_this_step = False
+                policy_corrected = False
+                memory_cost = 0.0  # Cost for memory intervention
+
+                if consult_memory:
+                    # Memory consulted: use memory action and apply teacher forcing
+                    action_to_take = memory_action_idx
+                    teacher_force_this_step = True
+                    consulted = True
+                    memory_cost = self.memory_consultation_cost
+                else:
+                    # Memory not consulted: sample from policy
+                    sampled_action, log_prob = network.sample_action(action_logits)
+                    sampled_action_idx = sampled_action.item()
+                    consulted = False
+
+                    if self.hard_teacher_force:
+                        # Check if sampled action matches memory
+                        if sampled_action_idx != memory_action_idx:
+                            # Mismatch: correct to memory action and apply teacher forcing
+                            action_to_take = memory_action_idx
+                            teacher_force_this_step = True
+                            policy_corrected = True
+                            memory_cost = self.memory_correction_cost
+                        else:
+                            # Match: use sampled action, no teacher forcing
+                            action_to_take = sampled_action_idx
+                            teacher_force_this_step = False
+                    else:
+                        # hard_teacher_force=False: always use sampled action
+                        action_to_take = sampled_action_idx
+                        teacher_force_this_step = False
+
+                # Get log probability for the action we're storing in trajectory
+                # (for policy gradient, we need log prob of action_to_take)
+                action_tensor = torch.tensor([action_to_take], dtype=torch.long)
+                log_prob = network.get_log_prob(action_logits, action_tensor)
+
                 # Store trajectory data
                 trajectory['states'].append(torch.tensor(state['current_encoding']))
                 trajectory['goals'].append(torch.tensor(state['goal_encoding']))
-                trajectory['actions'].append(action.item())
+                trajectory['actions'].append(action_to_take)
                 trajectory['log_probs'].append(log_prob)
                 trajectory['values'].append(value.squeeze())
                 trajectory['hiddens'].append(hidden)
                 trajectory['node_sequence'].append(state['current_pos'])
                 trajectory['action_probs'].append(action_probs)
+                trajectory['used_slow'].append(teacher_force_this_step)
+                trajectory['policy_entropies'].append(policy_entropy)
+                trajectory['consulted_memory'].append(consulted)
+                trajectory['policy_corrected'].append(policy_corrected)
 
                 # Take step
-                next_state, reward, done, info = env.step(action.item(), used_slow=False)
+                next_state, reward, done, info = env.step(action_to_take, used_slow=False)
 
-                trajectory['rewards'].append(reward)
+                # Apply memory intervention cost to reward
+                reward_with_cost = reward - memory_cost
+
+                trajectory['rewards'].append(reward_with_cost)
                 trajectory['dones'].append(done)
 
-                episode_reward += reward
+                episode_reward += reward_with_cost
                 episode_length += 1
 
                 if done:
@@ -269,6 +347,13 @@ class LambdaExperiment:
                 wrong_turn = compute_wrong_turn_rate(trajectory, graph, shortest_path)
                 junction_metrics['wrong_turn_rate'] = wrong_turn
 
+            # Compute consultation and correction statistics
+            consultation_rate = np.mean(trajectory['consulted_memory']) if len(trajectory['consulted_memory']) > 0 else 0.0
+            correction_rate = np.mean(trajectory['policy_corrected']) if len(trajectory['policy_corrected']) > 0 else 0.0
+            mean_policy_entropy = np.mean(trajectory['policy_entropies']) if len(trajectory['policy_entropies']) > 0 else 0.0
+            consulted_indices = [i for i, c in enumerate(trajectory['consulted_memory']) if c]
+            mean_consultation_entropy = np.mean([trajectory['policy_entropies'][i] for i in consulted_indices]) if consulted_indices else 0.0
+
             # Store episode results
             episode_result = {
                 # Configuration
@@ -289,6 +374,11 @@ class LambdaExperiment:
                 'entropy_loss': loss_dict['entropy_loss'],
                 'mean_entropy': loss_dict['mean_entropy'],
                 'mean_value': loss_dict['mean_value'],
+                # Memory consultation metrics
+                'consultation_rate': consultation_rate,
+                'correction_rate': correction_rate,
+                'mean_policy_entropy': mean_policy_entropy,
+                'mean_consultation_entropy': mean_consultation_entropy,
                 # Topology metrics (global)
                 'topo_num_dead_ends': topo_metrics['num_dead_ends'],
                 'topo_num_corridors': topo_metrics['num_corridors'],
@@ -440,6 +530,10 @@ class LambdaExperiment:
             'effective_credit_distance': 'mean',
             'mean_decision_localization': 'mean',
             'wrong_turn_rate': 'mean',
+            'consultation_rate': 'mean',
+            'correction_rate': 'mean',
+            'mean_policy_entropy': 'mean',
+            'mean_consultation_entropy': 'mean',
         }).reset_index()
 
         summary_file = os.path.join(output_dir, 'summary_statistics.csv')
@@ -508,26 +602,27 @@ def main():
     # Experiment configuration
     config = {
         'lambda_values': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        'seeds': [101,110,120,160,180],  # 5 seeds
-        'num_episodes': 1500,
+        'seeds': [103],  # 5 seeds
+        'num_episodes': 1000,
         'topologies': [
             # Procedural topologies (Family D)
-            'maze_0.0',
-            'maze_0.1',
-            'maze_0.2',
-            'maze_0.3',
-            'maze_0.4',
-            'maze_0.5',
-            'maze_0.6',
-            'maze_0.7',
-            'maze_0.8',
-            'maze_0.9',
-            'maze_1.0'
+            '0.0 corridor',
+            '0.2 corridor',
+            '0.3 corridor',
+            '0.4 corridor',
+            '0.6 corridor',
+            '0.9 corridor',
+            '1.0 corridor',
         ],
         'lr': 3e-4,
         'gamma': 0.99,
         'entropy_coef': 0.01,
         'value_coef': 0.5,
+        'tau': 1.0,  # Threshold entropy for memory consultation
+        'consultation_temperature': 2.0,  # Temperature for sigmoid gating
+        'hard_teacher_force': True,  # Whether to correct wrong policy samples
+        'memory_consultation_cost': 0.01,  # Reward penalty for consulting memory
+        'memory_correction_cost': 0.01,  # Reward penalty for being corrected by memory
         'output_dir': f'lambda_experiment_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
     }
 

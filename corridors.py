@@ -340,8 +340,11 @@ if __name__ == "__main__":
     # corridor_vals = [0.5]
     all_stats = []
 
+    leng = 4
+    widt = 6
+
     for corridor_val in corridor_vals:
-        maze = MazeGraph(length=5, width=5, corridor=corridor_val, seed=180)
+        maze = MazeGraph(length=leng, width=widt, corridor=corridor_val, seed=103)
         stats = maze.get_stats()
         all_stats.append(stats)
 
@@ -351,8 +354,9 @@ if __name__ == "__main__":
         print(f"  Nodes with 2 connections (corridors): {stats['nodes_with_2_connections']}")
         print(f"  Nodes with 3+ connections (junctions): {stats['nodes_with_3plus_connections']}")
 
-        maze.visualize(save_path=f'results/graphs/corridors/5x5/maze_corridor_{corridor_val:.1f}.png')
+        maze.visualize(save_path=f'results/graphs/corridors/{leng}x{widt}/maze_corridor_{corridor_val:.1f}.png')
         # maze.visualize()
+        # plt.show()
 
     # Plot statistics across corridor values
     fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
@@ -383,4 +387,4 @@ if __name__ == "__main__":
         ax.set_facecolor('#F8F9FA')
 
         plt.tight_layout()
-        plt.savefig('results/graphs/corridors/5x5/node_distribution_by_corridor.png', dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(f'results/graphs/corridors/{leng}x{widt}/node_distribution_by_corridor.png', dpi=300, bbox_inches='tight', facecolor='white')
