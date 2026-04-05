@@ -131,8 +131,8 @@ class SmallGridSweepPlotter:
         fig.savefig(pdf_path, bbox_inches="tight")
         print(f"Saved: {png_path}")
     
-    def sigmoid(self, x):
-        return 1 / (1 + np.exp(-x))
+    def sigmoid(self, x, temp=1.0):
+        return 1 / (1 + np.exp(-x / temp))
 
     @staticmethod
     def _format_lr(lr):
@@ -187,96 +187,156 @@ class SmallGridSweepPlotter:
         ax.grid(alpha=0.3, linewidth=0.5)
         ax.legend()
 
-    def plot_lambda_lr_metrics(self, teacher_coef=6.5, tau=0.4):
-        data = self.df[
-            np.isclose(self.df["teacher_coef"], teacher_coef) &
-            np.isclose(self.df["tau"], tau)
-        ].copy()
-
-        if data.empty:
-            print(f"No data found for teacher_coef={teacher_coef}, tau={tau}")
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(13, 10))
-
-        self._plot_metric_vs_lambda(
-            axes[0, 0], data,
-            metric="final_success_rate",
-            ylabel="Final Success Rate",
-            title=f"Final Success vs λ (teacher={teacher_coef:g}, tau={tau:g})",
-        )
-        axes[0, 0].set_ylim(-0.02, 1.02)
-
-        self._plot_metric_vs_lambda(
-            axes[0, 1], data,
-            metric="final_avg_reward",
-            ylabel="Final Episode Reward",
-            title=f"Final Reward vs λ (teacher={teacher_coef:g}, tau={tau:g})",
-        )
-
-        self._plot_metric_vs_lambda(
-            axes[1, 0], data,
-            metric="final_avg_episode_length",
-            ylabel="Final Episode Length",
-            title=f"Final Episode Length vs λ (teacher={teacher_coef:g}, tau={tau:g})",
-        )
-
-        self._plot_metric_vs_lambda(
-            axes[1, 1], data,
-            metric="auc_success_rate",
-            ylabel="AUC of Success Rate",
-            title=f"AUC Success vs λ (teacher={teacher_coef:g}, tau={tau:g})",
-        )
-        axes[1, 1].set_ylim(-0.02, 1.02)
-
-        plt.tight_layout()
-        self._save_fig(fig, "01_lambda_lr_metrics_teacher6p5_tau0p4")
-        plt.close(fig)
-
-    def plot_entropy_minus_tau_vs_teacher(self):
-        """Plot entropy-tau delta vs LR/teacher_coef pairs, matching value loss explosion format."""
-        # Create one subplot per lambda (same layout as value loss explosion)
+    def plot_lambda_lr_metrics(self):
+        """Plot success rate AUC vs LR/teacher_coef pairs with mean + std dev ribbons."""
+        # Create one subplot per lambda
         fig, axes = plt.subplots(2, 3, figsize=(15, 9))
         axes = axes.flatten()
 
-        # Assign colormaps to teacher_coef values (same as value loss plot)
-        teacher_colormaps = {}
-        if len(self.teacher_values) >= 1:
-            teacher_colormaps[self.teacher_values[0]] = plt.cm.Greens
-        if len(self.teacher_values) >= 2:
-            teacher_colormaps[self.teacher_values[1]] = plt.cm.Blues
-        if len(self.teacher_values) >= 3:
-            teacher_colormaps[self.teacher_values[2]] = plt.cm.Reds
-
-        # Map tau to color intensity within each colormap
-        tau_positions = np.linspace(0.4, 0.9, len(self.tau_values))
+        # Use plasma colormap for teacher_coef values
+        teacher_colors = {}
+        color_positions = np.linspace(0.2, 0.85, len(self.teacher_values))
+        for i, teacher in enumerate(self.teacher_values):
+            teacher_colors[teacher] = plt.cm.plasma(color_positions[i])
 
         for ax, lam in zip(axes, self.lambda_values):
             lam_df = self.df[np.isclose(self.df["lambda"], lam)].copy()
 
             for teacher in self.teacher_values:
-                cmap = teacher_colormaps.get(teacher, plt.cm.Greys)
+                color = teacher_colors.get(teacher, 'gray')
 
-                for i, tau in enumerate(self.tau_values):
+                # Collect data across all tau values for this teacher_coef
+                lr_data = {}  # lr -> list of auc_success_rate values
+
+                for tau in self.tau_values:
                     sub = lam_df[
                         np.isclose(lam_df["tau"], tau) &
                         np.isclose(lam_df["teacher_coef"], teacher)
                     ].sort_values("lr")
 
-                    if sub.empty:
-                        continue
+                    for _, row in sub.iterrows():
+                        lr_val = row["lr"]
+                        auc_val = row["auc_success_rate"]
+                        # Only include finite AUC values
+                        if np.isfinite(auc_val):
+                            if lr_val not in lr_data:
+                                lr_data[lr_val] = []
+                            lr_data[lr_val].append(auc_val)
 
-                    ax.plot(
-                        sub["lr"],
-                        self.sigmoid(sub["final_entropy_minus_tau"]),
-                        marker="o",
-                        linewidth=1.8,
-                        markersize=6,
-                        color=cmap(tau_positions[i]),
-                        label=f"t={self._teacher_label(teacher)}, τ={tau:g}",
-                    )
+                if not lr_data:
+                    continue
 
-            ax.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.6)
+                # Compute mean and std dev across tau for each lr
+                lrs = sorted(lr_data.keys())
+                means = [np.mean(lr_data[lr]) for lr in lrs]
+                stds = [np.std(lr_data[lr]) for lr in lrs]
+
+                # Plot mean line
+                ax.plot(
+                    lrs,
+                    means,
+                    marker="o",
+                    linewidth=2.5,
+                    markersize=8,
+                    color=color,
+                    label=f"teacher={self._teacher_label(teacher)}",
+                    zorder=3,
+                )
+
+                # Plot std dev ribbon
+                means_array = np.array(means)
+                stds_array = np.array(stds)
+                ax.fill_between(
+                    lrs,
+                    means_array - stds_array,
+                    means_array + stds_array,
+                    color=color,
+                    alpha=0.2,
+                    zorder=2,
+                )
+
+            ax.set_xscale("log")
+            ax.set_xticks(self.lr_values)
+            ax.set_xticklabels([self._format_lr(lr) for lr in self.lr_values], rotation=20)
+            ax.set_xlabel("Learning Rate")
+            ax.set_ylabel("AUC of Success Rate")
+            ax.set_title(f"λ = {lam:.1f}")
+            # ax.set_ylim(-0.02, 1.02)
+            ax.grid(alpha=0.3, linewidth=0.5)
+            ax.legend(fontsize=9, ncol=1)
+
+        fig.suptitle("AUC Success Rate vs Learning Rate (mean ± std dev across tau)", y=0.995)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+        self._save_fig(fig, "01_auc_success_rate")
+        plt.close(fig)
+
+    def plot_entropy_minus_tau_vs_teacher(self):
+        """Plot entropy-tau delta vs LR/teacher_coef pairs with mean + std dev ribbons."""
+        # Create one subplot per lambda
+        fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+        axes = axes.flatten()
+
+        # Use plasma colormap for teacher_coef values
+        teacher_colors = {}
+        color_positions = np.linspace(0.2, 0.85, len(self.teacher_values))
+        for i, teacher in enumerate(self.teacher_values):
+            teacher_colors[teacher] = plt.cm.plasma(color_positions[i])
+
+        for ax, lam in zip(axes, self.lambda_values):
+            lam_df = self.df[np.isclose(self.df["lambda"], lam)].copy()
+
+            for teacher in self.teacher_values:
+                color = teacher_colors.get(teacher, 'gray')
+
+                # Collect data across all tau values for this teacher_coef
+                lr_data = {}  # lr -> list of sigmoid(entropy_minus_tau) values
+
+                for tau in self.tau_values:
+                    sub = lam_df[
+                        np.isclose(lam_df["tau"], tau) &
+                        np.isclose(lam_df["teacher_coef"], teacher)
+                    ].sort_values("lr")
+
+                    for _, row in sub.iterrows():
+                        lr_val = row["lr"]
+                        if lr_val not in lr_data:
+                            lr_data[lr_val] = []
+                        lr_data[lr_val].append(self.sigmoid(row["final_entropy_minus_tau"]))
+
+                if not lr_data:
+                    continue
+
+                # Compute mean and std dev across tau for each lr
+                lrs = sorted(lr_data.keys())
+                means = [np.mean(lr_data[lr]) for lr in lrs]
+                stds = [np.std(lr_data[lr]) for lr in lrs]
+
+                # Plot mean line
+                ax.plot(
+                    lrs,
+                    means,
+                    marker="o",
+                    linewidth=2.5,
+                    markersize=8,
+                    color=color,
+                    label=f"teacher={self._teacher_label(teacher)}",
+                    zorder=3,
+                )
+
+                # Plot std dev ribbon
+                means_array = np.array(means)
+                stds_array = np.array(stds)
+                ax.fill_between(
+                    lrs,
+                    means_array - stds_array,
+                    means_array + stds_array,
+                    color=color,
+                    alpha=0.2,
+                    zorder=2,
+                )
+
+            ax.axhline(0.5, color="black", linestyle="--", linewidth=1, alpha=0.6, zorder=1)
             ax.set_xscale("log")
             ax.set_xticks(self.lr_values)
             ax.set_xticklabels([self._format_lr(lr) for lr in self.lr_values], rotation=20)
@@ -284,73 +344,14 @@ class SmallGridSweepPlotter:
             ax.set_ylabel(r"$\sigma(H - \tau)$ after training")
             ax.set_title(f"λ = {lam:.1f}")
             ax.grid(alpha=0.3, linewidth=0.5)
-            ax.legend(fontsize=7, ncol=1)
+            ax.legend(fontsize=9, ncol=1)
 
-        fig.suptitle(r"$\sigma(H - \tau)$ vs Learning Rate", y=0.995)
+        fig.suptitle(r"$\sigma(H - \tau)$ vs Learning Rate (mean ± std dev across tau)", y=0.995)
 
-        # Add colormap family legend (same as value loss plot)
-        teacher_handles = []
-        teacher_labels = []
-        for teacher in self.teacher_values:
-            cmap = teacher_colormaps.get(teacher, plt.cm.Greys)
-            teacher_handles.append(Line2D([0], [0], color=cmap(0.65), lw=3))
-            teacher_labels.append(f"teacher={self._teacher_label(teacher)}")
-
-        fig.legend(teacher_handles, teacher_labels, loc="upper center", ncol=len(self.teacher_values),
-                  title="Teacher coef color families (darker = higher tau)", frameon=True, bbox_to_anchor=(0.5, 0.96))
-
-        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
         self._save_fig(fig, "02_entropy_minus_tau_vs_teacher")
         plt.close(fig)
 
-    def plot_entropy_minus_tau_vs_lr_by_lambda(self):
-        teacher_colors = self._teacher_color_map()
-
-        for tau in self.tau_values:
-            tau_df = self.df[np.isclose(self.df["tau"], tau)].copy()
-            if tau_df.empty:
-                continue
-
-            fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharey=True)
-            axes = axes.flatten()
-
-            for ax, lam in zip(axes, self.lambda_values):
-                lam_df = tau_df[np.isclose(tau_df["lambda"], lam)].copy()
-
-                for teacher in self.teacher_values:
-                    sub = lam_df[np.isclose(lam_df["teacher_coef"], teacher)].sort_values("lr")
-                    if sub.empty:
-                        continue
-
-                    ax.plot(
-                        sub["lr"],
-                        sub["final_entropy_minus_tau"],
-                        marker="o",
-                        linewidth=2,
-                        markersize=6,
-                        color=teacher_colors[teacher],
-                        label=f"teacher={self._teacher_label(teacher)}",
-                    )
-
-                ax.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.6)
-                ax.set_xscale("log")
-                ax.set_xticks(self.lr_values)
-                ax.set_xticklabels([self._format_lr(lr) for lr in self.lr_values], rotation=20)
-                ax.set_xlabel("Learning Rate")
-                ax.set_title(f"λ = {lam:.1f}")
-                ax.grid(alpha=0.3, linewidth=0.5)
-
-            axes[0].set_ylabel("Final (Entropy - Tau)")
-            axes[3].set_ylabel("Final (Entropy - Tau)")
-
-            handles, labels = axes[0].get_legend_handles_labels()
-            fig.legend(handles, labels, loc="upper center", ncol=len(self.teacher_values), frameon=True)
-            fig.suptitle(f"Final (Entropy - Tau) vs Learning Rate, grouped by Teacher Coefficient (tau={tau:g})", y=1.02)
-
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            tau_name = str(tau).replace(".", "p")
-            self._save_fig(fig, f"03_entropy_minus_tau_vs_lr_by_lambda_tau_{tau_name}")
-            plt.close(fig)
 
     def plot_best_lr_summary(self):
         data = self.df.copy()
@@ -358,9 +359,25 @@ class SmallGridSweepPlotter:
         if data.empty:
             return
 
-        # Compute composite metric: reward * sigmoid(negative entropy-tau) / value_loss
-        # Higher is better: high reward AND negative (entropy - tau) AND low value loss
-        data["composite_metric"] = data["final_avg_reward"] * (1 - self.sigmoid(data["final_entropy_minus_tau"])) / (data["final_value_loss"])
+        # Compute composite metric using normalized weighted sum
+        # Priority: (1) high AUC + low memory reliance, (2) no value loss explosion
+
+        # AUC is already [0,1], but handle NaN values
+        auc_norm = data["auc_success_rate"].fillna(0)  # Treat NaN as worst case
+
+        # Memory independence is already [0,1] from sigmoid
+        memory_independence = 1 - self.sigmoid(data["final_entropy_minus_tau"])
+
+        # Normalize value loss to [0,1], then invert (higher stability is better)
+        vl_min = data["final_value_loss"].min()
+        vl_max = data["final_value_loss"].max()
+        value_loss_norm = (data["final_value_loss"] - vl_min) / (vl_max - vl_min)
+        stability = 1 - value_loss_norm
+
+        # Weighted combination: 70% primary objective (AUC × memory), 30% stability
+        w_primary = 0.7
+        w_stability = 0.3
+        data["composite_metric"] = w_primary * (auc_norm * memory_independence) + w_stability * stability
 
         win_rows = []
         for lam in self.lambda_values:
@@ -371,7 +388,6 @@ class SmallGridSweepPlotter:
             # Filter for finite values in all required columns
             valid_sub = sub[
                 np.isfinite(sub["composite_metric"]) &
-                np.isfinite(sub["final_avg_reward"]) &
                 np.isfinite(sub["final_entropy_minus_tau"]) &
                 np.isfinite(sub["final_value_loss"]) &
                 (sub["final_value_loss"] > 0)  # Avoid division by zero
@@ -389,8 +405,10 @@ class SmallGridSweepPlotter:
                 "best_teacher_coef": float(best_row["teacher_coef"]),
                 "best_tau": float(best_row["tau"]),
                 "best_composite_metric": float(best_row["composite_metric"]),
-                "final_reward": float(best_row["final_avg_reward"]),
+                "auc_success_rate": float(best_row["auc_success_rate"]) if np.isfinite(best_row["auc_success_rate"]) else 0.0,
                 "entropy_minus_tau": float(best_row["final_entropy_minus_tau"]),
+                "sigmoid_entropy_minus_tau": float(self.sigmoid(best_row["final_entropy_minus_tau"])),
+                "final_value_loss": float(best_row["final_value_loss"]),
             })
 
         win_df = pd.DataFrame(win_rows)
@@ -398,9 +416,10 @@ class SmallGridSweepPlotter:
             return
 
         lr_colors = self._lr_color_map()
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
+        axes = axes.flatten()
 
-        # Left panel: composite metric
+        # Top-left panel: composite metric
         ax = axes[0]
         for _, r in win_df.iterrows():
             ax.scatter(r["lambda"], r["best_composite_metric"], s=120, color=lr_colors[r["best_lr"]], zorder=3)
@@ -409,21 +428,50 @@ class SmallGridSweepPlotter:
                     label, ha="left", va="top", fontsize=7)
         ax.plot(win_df["lambda"], win_df["best_composite_metric"], color="gray", alpha=0.5, linewidth=1)
         ax.set_xlabel("Lambda (λ)")
-        ax.set_ylabel(r"Reward $\times$ $\sigma$($H-\tau$)/ValueLoss")
+        ax.set_ylabel("Composite Metric")
         ax.set_title("Best Composite Metric by λ")
         ax.grid(alpha=0.3, linewidth=0.5)
 
-        # Right panel: final reward for those same best configs
+        # Top-right panel: AUC success rate for those same best configs
         ax = axes[1]
         for _, r in win_df.iterrows():
-            ax.scatter(r["lambda"], r["final_reward"], s=120, color=lr_colors[r["best_lr"]], zorder=3)
+            ax.scatter(r["lambda"], r["auc_success_rate"], s=120, color=lr_colors[r["best_lr"]], zorder=3)
             label = f"t={r['best_teacher_coef']:g}\nτ={r['best_tau']:g}"
-            ax.text(r["lambda"], r["final_reward"] + 0.02, label,
+            ax.text(r["lambda"], r["auc_success_rate"] + 0.02, label,
                     ha="left", va="top", fontsize=7)
-        ax.plot(win_df["lambda"], win_df["final_reward"], color="gray", alpha=0.5, linewidth=1)
+        ax.plot(win_df["lambda"], win_df["auc_success_rate"], color="gray", alpha=0.5, linewidth=1)
         ax.set_xlabel("Lambda (λ)")
-        ax.set_ylabel("Final Reward")
-        ax.set_title("Final Reward of Best Configs")
+        ax.set_ylabel("AUC Success Rate")
+        ax.set_title("AUC Success Rate of Best Configs")
+        ax.set_ylim(-0.02, 1.02)
+        ax.grid(alpha=0.3, linewidth=0.5)
+
+        # Bottom-left panel: sigmoid(H-tau) for those same best configs
+        ax = axes[2]
+        for _, r in win_df.iterrows():
+            ax.scatter(r["lambda"], r["sigmoid_entropy_minus_tau"], s=120, color=lr_colors[r["best_lr"]], zorder=3)
+            label = f"t={r['best_teacher_coef']:g}\nτ={r['best_tau']:g}"
+            ax.text(r["lambda"], r["sigmoid_entropy_minus_tau"] + 0.02, label,
+                    ha="left", va="top", fontsize=7)
+        ax.plot(win_df["lambda"], win_df["sigmoid_entropy_minus_tau"], color="gray", alpha=0.5, linewidth=1)
+        ax.axhline(0.5, color="black", linestyle="--", linewidth=1, alpha=0.6)
+        ax.set_xlabel("Lambda (λ)")
+        ax.set_ylabel(r"$\sigma(H - \tau)$")
+        ax.set_title(r"Final $\sigma(H - \tau)$ of Best Configs")
+        ax.grid(alpha=0.3, linewidth=0.5)
+
+        # Bottom-right panel: final value loss for those same best configs
+        ax = axes[3]
+        for _, r in win_df.iterrows():
+            ax.scatter(r["lambda"], r["final_value_loss"], s=120, color=lr_colors[r["best_lr"]], zorder=3)
+            label = f"t={r['best_teacher_coef']:g}\nτ={r['best_tau']:g}"
+            ax.text(r["lambda"], r["final_value_loss"] + 0.02 * (win_df["final_value_loss"].max() - win_df["final_value_loss"].min()), label,
+                    ha="left", va="top", fontsize=7)
+        ax.plot(win_df["lambda"], win_df["final_value_loss"], color="gray", alpha=0.5, linewidth=1)
+        ax.set_xlabel("Lambda (λ)")
+        ax.set_ylabel("Final Value Loss")
+        ax.set_title("Final Value Loss of Best Configs")
+        ax.set_yscale("log")
         ax.grid(alpha=0.3, linewidth=0.5)
 
         handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=clr, markersize=10,
@@ -435,47 +483,69 @@ class SmallGridSweepPlotter:
         plt.close(fig)
 
     def plot_value_loss_explosion(self):
-        """Plot final value loss vs LR/teacher_coef pairs to show instability from high LR and low teacher_coef."""
+        """Plot final value loss vs LR/teacher_coef pairs with mean + std dev ribbons."""
         # Create one subplot per lambda
         fig, axes = plt.subplots(2, 3, figsize=(15, 9))
         axes = axes.flatten()
 
-        # Assign colormaps to teacher_coef values
-        teacher_colormaps = {}
-        if len(self.teacher_values) >= 1:
-            teacher_colormaps[self.teacher_values[0]] = plt.cm.Greens
-        if len(self.teacher_values) >= 2:
-            teacher_colormaps[self.teacher_values[1]] = plt.cm.Blues
-        if len(self.teacher_values) >= 3:
-            teacher_colormaps[self.teacher_values[2]] = plt.cm.Reds
-
-        # Map tau to color intensity within each colormap
-        tau_positions = np.linspace(0.4, 0.9, len(self.tau_values))
+        # Use plasma colormap for teacher_coef values
+        teacher_colors = {}
+        color_positions = np.linspace(0.2, 0.85, len(self.teacher_values))
+        for i, teacher in enumerate(self.teacher_values):
+            teacher_colors[teacher] = plt.cm.plasma(color_positions[i])
 
         for ax, lam in zip(axes, self.lambda_values):
             lam_df = self.df[np.isclose(self.df["lambda"], lam)].copy()
 
             for teacher in self.teacher_values:
-                cmap = teacher_colormaps.get(teacher, plt.cm.Greys)
+                color = teacher_colors.get(teacher, 'gray')
 
-                for i, tau in enumerate(self.tau_values):
+                # Collect data across all tau values for this teacher_coef
+                lr_data = {}  # lr -> list of value_loss values
+
+                for tau in self.tau_values:
                     sub = lam_df[
                         np.isclose(lam_df["tau"], tau) &
                         np.isclose(lam_df["teacher_coef"], teacher)
                     ].sort_values("lr")
 
-                    if sub.empty:
-                        continue
+                    for _, row in sub.iterrows():
+                        lr_val = row["lr"]
+                        if lr_val not in lr_data:
+                            lr_data[lr_val] = []
+                        lr_data[lr_val].append(row["final_value_loss"])
 
-                    ax.plot(
-                        sub["lr"],
-                        sub["final_value_loss"],
-                        marker="o",
-                        linewidth=1.8,
-                        markersize=6,
-                        color=cmap(tau_positions[i]),
-                        label=f"t={self._teacher_label(teacher)}, τ={tau:g}",
-                    )
+                if not lr_data:
+                    continue
+
+                # Compute mean and std dev across tau for each lr
+                lrs = sorted(lr_data.keys())
+                means = [np.mean(lr_data[lr]) for lr in lrs]
+                stds = [np.std(lr_data[lr]) for lr in lrs]
+
+                # Plot mean line
+                ax.plot(
+                    lrs,
+                    means,
+                    marker="o",
+                    linewidth=2.5,
+                    markersize=8,
+                    color=color,
+                    label=f"teacher={self._teacher_label(teacher)}",
+                    zorder=3,
+                )
+
+                # Plot std dev ribbon
+                means_array = np.array(means)
+                stds_array = np.array(stds)
+                ax.fill_between(
+                    lrs,
+                    means_array - stds_array,
+                    means_array + stds_array,
+                    color=color,
+                    alpha=0.2,
+                    zorder=2,
+                )
 
             ax.set_xscale("log")
             ax.set_yscale("log")
@@ -485,22 +555,11 @@ class SmallGridSweepPlotter:
             ax.set_ylabel("Final Value Loss")
             ax.set_title(f"λ = {lam:.1f}")
             ax.grid(alpha=0.3, linewidth=0.5)
-            ax.legend(fontsize=7, ncol=1)
+            ax.legend(fontsize=9, ncol=1)
 
-        fig.suptitle("Value Loss Explosion: LR vs Teacher Coefficient", y=0.995)
+        fig.suptitle("Value Loss: LR vs Teacher Coefficient (mean ± std dev across tau)", y=0.995)
 
-        # Add colormap family legend
-        teacher_handles = []
-        teacher_labels = []
-        for teacher in self.teacher_values:
-            cmap = teacher_colormaps.get(teacher, plt.cm.Greys)
-            teacher_handles.append(Line2D([0], [0], color=cmap(0.65), lw=3))
-            teacher_labels.append(f"teacher={self._teacher_label(teacher)}")
-
-        fig.legend(teacher_handles, teacher_labels, loc="upper center", ncol=len(self.teacher_values),
-                  title="Teacher coef color families (darker = higher tau)", frameon=True, bbox_to_anchor=(0.5, 0.96))
-
-        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
         self._save_fig(fig, "05_value_loss_explosion")
         plt.close(fig)
 
@@ -511,9 +570,8 @@ class SmallGridSweepPlotter:
         print(f"Teacher coefs: {self.teacher_values}")
         print(f"Taus: {self.tau_values}")
 
-        self.plot_lambda_lr_metrics(teacher_coef=6.5, tau=0.4)
+        self.plot_lambda_lr_metrics()
         self.plot_entropy_minus_tau_vs_teacher()
-        self.plot_entropy_minus_tau_vs_lr_by_lambda()
         self.plot_best_lr_summary()
         self.plot_value_loss_explosion()
 

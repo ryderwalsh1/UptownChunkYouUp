@@ -16,6 +16,7 @@ Outputs are written under: smallgridsweep/
 import csv
 import json
 import math
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -34,7 +35,7 @@ from corridors import MazeGraph
 SEED = 103
 GRAPH_LENGTH = 8
 GRAPH_WIDTH = 8
-CORRIDOR_VAL = 0.0
+CORRIDOR_VAL = 1.0
 FIXED_START_NODE = (0, 0)
 GOAL_IS_DEADEND = True
 
@@ -311,6 +312,9 @@ def run_test_policy(env, network, slow_memory, tau, consultation_temperature, te
 
 
 def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
+    # Prevent PyTorch from spawning multiple threads per process
+    torch.set_num_threads(1)
+
     run_name = config_name(lambda_, lr, teacher_coef, tau)
     run_dir = outdir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -648,35 +652,40 @@ def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
 def main():
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    all_results = []
-    total_runs = len(LAMBDA_VALUES) * len(LR_VALUES) * len(TEACHER_VALUES) * len(TAU_VALUES)
-    run_idx = 0
+    # Generate all config combinations
+    configs = [
+        (lambda_, lr, teacher_coef, tau)
+        for lambda_ in LAMBDA_VALUES
+        for lr in LR_VALUES
+        for teacher_coef in TEACHER_VALUES
+        for tau in TAU_VALUES
+    ]
 
-    for lambda_ in LAMBDA_VALUES:
-        for lr in LR_VALUES:
-            for teacher_coef in TEACHER_VALUES:
-                for tau in TAU_VALUES:
-                    run_idx += 1
-                    print()
-                    print("#" * 100)
-                    print(f"Starting run {run_idx}/{total_runs}")
-                    print("#" * 100)
-                    result = run_single_config(
-                        lambda_=lambda_,
-                        lr=lr,
-                        teacher_coef=teacher_coef,
-                        tau=tau,
-                        outdir=OUTDIR,
-                    )
-                    all_results.append(result)
+    total_runs = len(configs)
+    num_cores = cpu_count()
 
-                    # Update cumulative CSV after every run
-                    csv_path = OUTDIR / "aggregate_results.csv"
-                    fieldnames = list(all_results[0].keys())
-                    with open(csv_path, "w", newline="") as f:
-                        writer = csv.DictWriter(f, fieldnames=fieldnames)
-                        writer.writeheader()
-                        writer.writerows(all_results)
+    print("=" * 100)
+    print(f"PARALLEL GRID SWEEP")
+    print(f"Total configs: {total_runs}")
+    print(f"Available CPU cores: {num_cores}")
+    print(f"Running in parallel using multiprocessing Pool")
+    print("=" * 100)
+    print()
+
+    # Run all configs in parallel
+    # Need to add OUTDIR to each config tuple for starmap
+    configs_with_outdir = [(l, lr, tc, t, OUTDIR) for l, lr, tc, t in configs]
+
+    with Pool() as pool:
+        all_results = pool.starmap(run_single_config, configs_with_outdir)
+
+    # Write aggregate results
+    csv_path = OUTDIR / "aggregate_results.csv"
+    fieldnames = list(all_results[0].keys())
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_results)
 
     # Also save a JSON copy
     with open(OUTDIR / "aggregate_results.json", "w") as f:

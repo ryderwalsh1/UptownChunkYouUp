@@ -35,6 +35,178 @@ import torch.nn.functional as F
 class LambdaExperiment:
     """Main experiment runner for testing λ across topologies."""
 
+    # Optimal hyperparameters from small grid sweep (see plot_smallgridsweep.py)
+    # Optimized for: 0.7 × (AUC × memory_independence) + 0.3 × stability
+    OPTIMAL_HYPERPARAMETERS = {
+        0.0: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.4},
+        0.2: {'lr': 6e-4, 'teacher_coef': 6.5, 'tau': 0.6},
+        0.4: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+        0.6: {'lr': 6e-4, 'teacher_coef': 3.0, 'tau': 0.6},
+        0.8: {'lr': 6e-4, 'teacher_coef': 6.5, 'tau': 0.6},
+        1.0: {'lr': 6e-4, 'teacher_coef': 3.0, 'tau': 0.4},
+    }
+
+    # 2D optimal hyperparameters: {junction_density: {lambda: {lr, teacher_coef, tau}}}
+    # Junction density = fraction of nodes with degree >= 3
+    OPTIMAL_HYPERPARAMETERS_2D = {
+        0.34: {  # Higher junction density (more branching)
+            0.0: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.4},
+            0.2: {'lr': 6e-4, 'teacher_coef': 6.5, 'tau': 0.6},
+            0.4: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            0.6: {'lr': 6e-4, 'teacher_coef': 3.0, 'tau': 0.6},
+            0.8: {'lr': 6e-4, 'teacher_coef': 6.5, 'tau': 0.6},
+            1.0: {'lr': 6e-4, 'teacher_coef': 3.0, 'tau': 0.4},
+        },
+        0.15: {  # Lower junction density (fewer branching points)
+            0.0: {'lr': 1.4e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            0.2: {'lr': 3e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            0.4: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            0.6: {'lr': 3e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            0.8: {'lr': 3e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+            1.0: {'lr': 6e-4, 'teacher_coef': 10.0, 'tau': 0.6},
+        }
+    }
+
+    @staticmethod
+    def get_optimal_hyperparameters_for_lambda(lambda_val):
+        """
+        Get optimal hyperparameters for a given lambda value.
+
+        Uses linear interpolation between empirically optimal points.
+
+        Parameters:
+        -----------
+        lambda_val : float
+            Lambda value in [0, 1]
+
+        Returns:
+        --------
+        dict with keys: lr, teacher_coef, tau
+        """
+        optimal_points = LambdaExperiment.OPTIMAL_HYPERPARAMETERS
+
+        # If exact match, return it
+        if lambda_val in optimal_points:
+            return optimal_points[lambda_val].copy()
+
+        # Find surrounding points for interpolation
+        lambda_keys = sorted(optimal_points.keys())
+
+        # Clamp to valid range
+        if lambda_val < lambda_keys[0]:
+            return optimal_points[lambda_keys[0]].copy()
+        if lambda_val > lambda_keys[-1]:
+            return optimal_points[lambda_keys[-1]].copy()
+
+        # Find bracketing points
+        upper_idx = next(i for i, k in enumerate(lambda_keys) if k > lambda_val)
+        lower_key = lambda_keys[upper_idx - 1]
+        upper_key = lambda_keys[upper_idx]
+
+        # Linear interpolation weight
+        alpha = (lambda_val - lower_key) / (upper_key - lower_key)
+
+        # Interpolate each parameter
+        lower_params = optimal_points[lower_key]
+        upper_params = optimal_points[upper_key]
+
+        return {
+            'lr': lower_params['lr'] * (1 - alpha) + upper_params['lr'] * alpha,
+            'teacher_coef': lower_params['teacher_coef'] * (1 - alpha) + upper_params['teacher_coef'] * alpha,
+            'tau': lower_params['tau'] * (1 - alpha) + upper_params['tau'] * alpha,
+        }
+
+    @staticmethod
+    def get_optimal_hyperparameters_2d(lambda_val, junction_density):
+        """
+        Get optimal hyperparameters for a given lambda and junction density using 2D bilinear interpolation.
+
+        Junction density is the fraction of nodes with degree >= 3 in the maze.
+
+        Parameters:
+        -----------
+        lambda_val : float
+            Lambda value in [0, 1]
+        junction_density : float
+            Junction density (typically in [0.15, 0.34])
+
+        Returns:
+        --------
+        dict with keys: lr, teacher_coef, tau
+        """
+        optimal_2d = LambdaExperiment.OPTIMAL_HYPERPARAMETERS_2D
+
+        # Get available junction densities and lambda values
+        jd_keys = sorted(optimal_2d.keys())
+        lambda_keys = sorted(optimal_2d[jd_keys[0]].keys())  # Assume all jd have same lambda keys
+
+        # Clamp junction density to measured range
+        jd_clamped = max(min(junction_density, jd_keys[-1]), jd_keys[0])
+
+        # Clamp lambda to [0, 1]
+        lambda_clamped = max(min(lambda_val, lambda_keys[-1]), lambda_keys[0])
+
+        # Check for exact match
+        if jd_clamped in jd_keys and lambda_clamped in lambda_keys:
+            return optimal_2d[jd_clamped][lambda_clamped].copy()
+
+        # Find bracketing junction densities
+        if jd_clamped <= jd_keys[0]:
+            jd1, jd2 = jd_keys[0], jd_keys[0]
+            jd_alpha = 0.0
+        elif jd_clamped >= jd_keys[-1]:
+            jd1, jd2 = jd_keys[-1], jd_keys[-1]
+            jd_alpha = 0.0
+        else:
+            jd2_idx = next(i for i, k in enumerate(jd_keys) if k > jd_clamped)
+            jd1 = jd_keys[jd2_idx - 1]
+            jd2 = jd_keys[jd2_idx]
+            jd_alpha = (jd_clamped - jd1) / (jd2 - jd1)
+
+        # Find bracketing lambda values
+        if lambda_clamped <= lambda_keys[0]:
+            lam1, lam2 = lambda_keys[0], lambda_keys[0]
+            lam_alpha = 0.0
+        elif lambda_clamped >= lambda_keys[-1]:
+            lam1, lam2 = lambda_keys[-1], lambda_keys[-1]
+            lam_alpha = 0.0
+        else:
+            lam2_idx = next(i for i, k in enumerate(lambda_keys) if k > lambda_clamped)
+            lam1 = lambda_keys[lam2_idx - 1]
+            lam2 = lambda_keys[lam2_idx]
+            lam_alpha = (lambda_clamped - lam1) / (lam2 - lam1)
+
+        # Get four corner points
+        p11 = optimal_2d[jd1][lam1]  # (jd1, lam1)
+        p12 = optimal_2d[jd1][lam2]  # (jd1, lam2)
+        p21 = optimal_2d[jd2][lam1]  # (jd2, lam1)
+        p22 = optimal_2d[jd2][lam2]  # (jd2, lam2)
+
+        # Helper function for linear interpolation
+        def lerp_param(v1, v2, alpha):
+            return v1 * (1 - alpha) + v2 * alpha
+
+        # Interpolate along lambda axis for each junction density
+        q1 = {
+            'lr': lerp_param(p11['lr'], p12['lr'], lam_alpha),
+            'teacher_coef': lerp_param(p11['teacher_coef'], p12['teacher_coef'], lam_alpha),
+            'tau': lerp_param(p11['tau'], p12['tau'], lam_alpha),
+        }
+        q2 = {
+            'lr': lerp_param(p21['lr'], p22['lr'], lam_alpha),
+            'teacher_coef': lerp_param(p21['teacher_coef'], p22['teacher_coef'], lam_alpha),
+            'tau': lerp_param(p21['tau'], p22['tau'], lam_alpha),
+        }
+
+        # Interpolate along junction density axis
+        result = {
+            'lr': lerp_param(q1['lr'], q2['lr'], jd_alpha),
+            'teacher_coef': lerp_param(q1['teacher_coef'], q2['teacher_coef'], jd_alpha),
+            'tau': lerp_param(q1['tau'], q2['tau'], jd_alpha),
+        }
+
+        return result
+
     def __init__(self, config):
         """
         Initialize experiment.
@@ -64,6 +236,7 @@ class LambdaExperiment:
         self.lr = config.get('lr', 3e-4)
         self.gamma = config.get('gamma', 0.99)
         self.entropy_coef = config.get('entropy_coef', 0.01)
+        self.teacher_coef = config.get('teacher_coef', 10.0)
         self.value_coef = config.get('value_coef', 0.5)
         self.tau = config.get('tau', 1.0)
         self.consultation_temperature = config.get('consultation_temperature', 2.0)
@@ -116,7 +289,7 @@ class LambdaExperiment:
             seed=seed,
             control_cost=0.0,  # No control cost for this experiment
             fixed_start_node=(0,0),  # Random start
-            goal_is_deadend=False  # Goals at dead-ends
+            goal_is_deadend=True  # Goals at dead-ends
         )
         env.maze = maze  # Use the generated maze
         env.graph = graph
@@ -141,6 +314,7 @@ class LambdaExperiment:
             gamma=self.gamma,
             lambda_=lambda_val,
             entropy_coef=self.entropy_coef,
+            teacher_coef=self.teacher_coef,
             value_coef=self.value_coef
         )
 
@@ -602,27 +776,32 @@ def main():
     # Experiment configuration
     config = {
         'lambda_values': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        'seeds': [103],  # 5 seeds
-        'num_episodes': 1000,
+        'seeds': [60,61,62,63,64,65],  # 5 seeds
+        'num_episodes': 3000,
         'topologies': [
             # Procedural topologies (Family D)
             '0.0 corridor',
+            '0.1 corridor',
             '0.2 corridor',
             '0.3 corridor',
             '0.4 corridor',
+            '0.5 corridor',
             '0.6 corridor',
+            '0.7 corridor',
+            '0.8 corridor',
             '0.9 corridor',
             '1.0 corridor',
         ],
         'lr': 3e-4,
         'gamma': 0.99,
         'entropy_coef': 0.01,
+        'teacher_coef': 3.0,
         'value_coef': 0.5,
-        'tau': 1.0,  # Threshold entropy for memory consultation
-        'consultation_temperature': 2.0,  # Temperature for sigmoid gating
-        'hard_teacher_force': True,  # Whether to correct wrong policy samples
-        'memory_consultation_cost': 0.01,  # Reward penalty for consulting memory
-        'memory_correction_cost': 0.01,  # Reward penalty for being corrected by memory
+        'tau': 0.4,  # Threshold entropy for memory consultation
+        'consultation_temperature': 0.5,  # Temperature for sigmoid gating
+        'hard_teacher_force': False,  # Whether to correct wrong policy samples
+        'memory_consultation_cost': 0.0,  # Reward penalty for consulting memory
+        'memory_correction_cost': 0.0,  # Reward penalty for being corrected by memory
         'output_dir': f'lambda_experiment_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
     }
 
