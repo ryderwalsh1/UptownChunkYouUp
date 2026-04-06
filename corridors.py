@@ -340,11 +340,11 @@ if __name__ == "__main__":
     # corridor_vals = [0.5]
     all_stats = []
 
-    leng = 4
-    widt = 6
+    leng = 8
+    widt = 8
 
     for corridor_val in corridor_vals:
-        maze = MazeGraph(length=leng, width=widt, corridor=corridor_val, seed=103)
+        maze = MazeGraph(length=leng, width=widt, corridor=corridor_val, seed=1002)
         stats = maze.get_stats()
         all_stats.append(stats)
 

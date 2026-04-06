@@ -468,7 +468,17 @@ class FastNetworkTrainer:
         log_probs = self.network.get_log_prob(action_logits, actions)
 
         # Policy loss (negative because we want to maximize expected return)
-        policy_loss = -(log_probs * advantages.detach()).mean()
+        # Only apply policy gradient to steps where slow was NOT used (to avoid conflicting with teacher forcing)
+        if used_slow is not None and any(used_slow):
+            fast_mask = torch.tensor([not u for u in used_slow], dtype=torch.bool)
+            if fast_mask.any():
+                policy_loss = -(log_probs[fast_mask] * advantages.detach()[fast_mask]).mean()
+            else:
+                # All steps used slow, no policy gradient
+                policy_loss = torch.tensor(0.0)
+        else:
+            # No teacher forcing, use all steps for policy gradient
+            policy_loss = -(log_probs * advantages.detach()).mean()
 
         # Value loss
         value_loss = F.mse_loss(values, returns)

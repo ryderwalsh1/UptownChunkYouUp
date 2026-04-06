@@ -43,74 +43,134 @@ plt.rcParams['figure.titlesize'] = 14
 
 
 class SmallGridSweepPlotter:
-    def __init__(self, results_dir="smallgridsweep", output_dir="smallgridsweep_figures"):
+    def __init__(self, results_dir="smallgridsweep", output_dir="smallgridsweep_figures", junction_filter=None):
         self.results_dir = Path(results_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        self.aggregate_csv = self.results_dir / "aggregate_results.csv"
-        if not self.aggregate_csv.exists():
-            raise FileNotFoundError(f"Could not find aggregate_results.csv in {self.results_dir}")
+        self.junction_filter = junction_filter  # None = all, or specify 10 or 20
 
         self.df = self._load_runs()
         self._normalize_columns()
 
     def _load_runs(self):
-        agg = pd.read_csv(self.aggregate_csv)
-        rows = []
+        import re
 
-        for _, row in agg.iterrows():
-            summary_path = Path(row["summary_path"])
-            # If path is relative and doesn't exist as-is, try prepending results_dir
-            if not summary_path.is_absolute():
-                if not summary_path.exists():
-                    summary_path = self.results_dir / summary_path
+        # Find all seed subdirectories matching pattern: smallgridsweep_XXj_seedYYY
+        seed_dirs = []
+        pattern = re.compile(r'smallgridsweep_(\d+)j_seed(\d+)')
 
-            timeseries_path = Path(row["timeseries_path"])
-            if not timeseries_path.is_absolute():
-                if not timeseries_path.exists():
-                    timeseries_path = self.results_dir / timeseries_path
+        for subdir in self.results_dir.iterdir():
+            if subdir.is_dir():
+                match = pattern.match(subdir.name)
+                if match:
+                    junction_count = int(match.group(1))
+                    seed = int(match.group(2))
+                    aggregate_csv = subdir / "aggregate_results.csv"
+                    if aggregate_csv.exists():
+                        seed_dirs.append({
+                            'path': subdir,
+                            'junction_count': junction_count,
+                            'seed': seed,
+                            'csv': aggregate_csv
+                        })
 
-            run_summary = {}
-            if summary_path.exists():
-                with open(summary_path, "r") as f:
-                    run_summary = json.load(f)
+        if not seed_dirs:
+            raise FileNotFoundError(
+                f"Could not find any seed subdirectories matching 'smallgridsweep_*j_seed*' in {self.results_dir}"
+            )
 
-            config = run_summary.get("config", {})
-            summary = run_summary.get("summary", {})
-            tests = run_summary.get("tests", {})
+        # Apply junction filter if specified
+        if self.junction_filter is not None:
+            seed_dirs = [sd for sd in seed_dirs if sd['junction_count'] == self.junction_filter]
+            if not seed_dirs:
+                raise FileNotFoundError(
+                    f"No seed directories found with junction_count={self.junction_filter}"
+                )
+            print(f"Filtering for junction_count={self.junction_filter}")
 
-            auc_success_rate = np.nan
-            if timeseries_path.exists():
-                ts = np.load(timeseries_path, allow_pickle=True)
-                if "success_history" in ts:
-                    success_history = np.asarray(ts["success_history"], dtype=float)
-                    if success_history.size > 1:
-                        auc_success_rate = float(np.trapz(success_history, dx=1.0) / (success_history.size - 1))
-                    elif success_history.size == 1:
-                        auc_success_rate = float(success_history[0])
+        print(f"Found {len(seed_dirs)} seed directories:")
+        for sd in sorted(seed_dirs, key=lambda x: (x['junction_count'], x['seed'])):
+            print(f"  {sd['path'].name} (junctions={sd['junction_count']}, seed={sd['seed']})")
 
-            rows.append({
-                "run_name": row.get("run_name"),
-                "lambda": float(row.get("lambda", config.get("lambda"))),
-                "lr": float(row.get("lr", config.get("lr"))),
-                "teacher_coef": float(row.get("teacher_coef", config.get("teacher_coef"))),
-                "tau": float(row.get("tau", config.get("tau"))),
-                "final_success_rate": float(summary.get("final_success_rate_rolling", row.get("final_success_rate_rolling", np.nan))),
-                "final_avg_reward": float(summary.get("final_avg_reward_rolling", row.get("final_avg_reward_rolling", np.nan))),
-                "final_avg_episode_length": float(summary.get("final_avg_episode_length", row.get("final_avg_episode_length", np.nan))),
-                "final_avg_entropy": float(summary.get("final_avg_entropy", row.get("final_avg_entropy", np.nan))),
-                "final_avg_consultation_rate": float(summary.get("final_avg_consultation_rate", row.get("final_avg_consultation_rate", np.nan))),
-                "final_avg_correction_rate": float(summary.get("final_avg_correction_rate", row.get("final_avg_correction_rate", np.nan))),
-                "final_value_loss": float(summary.get("mean_value_loss_overall", np.nan)),
-                "memory_test_success_rate": float(tests.get("memory_consultation", {}).get("success_rate", row.get("memory_test_success_rate", np.nan))),
-                "fast_only_test_success_rate": float(tests.get("fast_only", {}).get("success_rate", row.get("fast_only_test_success_rate", np.nan))),
-                "auc_success_rate": auc_success_rate,
-                "summary_path": str(summary_path),
-                "timeseries_path": str(timeseries_path),
-            })
+        # Load all runs from all seed directories
+        all_rows = []
 
-        return pd.DataFrame(rows)
+        for seed_info in seed_dirs:
+            seed_dir = seed_info['path']
+            junction_count = seed_info['junction_count']
+            seed = seed_info['seed']
+
+            agg = pd.read_csv(seed_info['csv'])
+
+            for _, row in agg.iterrows():
+                summary_path = Path(row["summary_path"])
+                # If path is relative and doesn't exist as-is, try prepending seed_dir
+                if not summary_path.is_absolute():
+                    if not summary_path.exists():
+                        summary_path = seed_dir / summary_path
+
+                timeseries_path = Path(row["timeseries_path"])
+                if not timeseries_path.is_absolute():
+                    if not timeseries_path.exists():
+                        timeseries_path = seed_dir / timeseries_path
+
+                run_summary = {}
+                if summary_path.exists():
+                    with open(summary_path, "r") as f:
+                        run_summary = json.load(f)
+
+                config = run_summary.get("config", {})
+                summary = run_summary.get("summary", {})
+                tests = run_summary.get("tests", {})
+
+                auc_success_rate = np.nan
+                if timeseries_path.exists():
+                    ts = np.load(timeseries_path, allow_pickle=True)
+                    if "success_history" in ts:
+                        success_history = np.asarray(ts["success_history"], dtype=float)
+                        if success_history.size > 1:
+                            auc_success_rate = float(np.trapz(success_history, dx=1.0) / (success_history.size - 1))
+                        elif success_history.size == 1:
+                            auc_success_rate = float(success_history[0])
+
+                all_rows.append({
+                    "seed": seed,
+                    "junction_count": junction_count,
+                    "run_name": row.get("run_name"),
+                    "lambda": float(row.get("lambda", config.get("lambda"))),
+                    "lr": float(row.get("lr", config.get("lr"))),
+                    "teacher_coef": float(row.get("teacher_coef", config.get("teacher_coef"))),
+                    "tau": float(row.get("tau", config.get("tau"))),
+                    "final_success_rate": float(summary.get("final_success_rate_rolling", row.get("final_success_rate_rolling", np.nan))),
+                    "final_avg_reward": float(summary.get("final_avg_reward_rolling", row.get("final_avg_reward_rolling", np.nan))),
+                    "final_avg_episode_length": float(summary.get("final_avg_episode_length", row.get("final_avg_episode_length", np.nan))),
+                    "final_avg_entropy": float(summary.get("final_avg_entropy", row.get("final_avg_entropy", np.nan))),
+                    "final_avg_consultation_rate": float(summary.get("final_avg_consultation_rate", row.get("final_avg_consultation_rate", np.nan))),
+                    "final_avg_correction_rate": float(summary.get("final_avg_correction_rate", row.get("final_avg_correction_rate", np.nan))),
+                    "final_value_loss": float(summary.get("mean_value_loss_overall", np.nan)),
+                    "memory_test_success_rate": float(tests.get("memory_consultation", {}).get("success_rate", row.get("memory_test_success_rate", np.nan))),
+                    "fast_only_test_success_rate": float(tests.get("fast_only", {}).get("success_rate", row.get("fast_only_test_success_rate", np.nan))),
+                    "auc_success_rate": auc_success_rate,
+                })
+
+        df_all = pd.DataFrame(all_rows)
+
+        # Group by hyperparameters and junction_count, then average across seeds
+        grouping_cols = ["lambda", "lr", "teacher_coef", "tau", "junction_count"]
+        metric_cols = [
+            "final_success_rate", "final_avg_reward", "final_avg_episode_length",
+            "final_avg_entropy", "final_avg_consultation_rate", "final_avg_correction_rate",
+            "final_value_loss", "memory_test_success_rate", "fast_only_test_success_rate",
+            "auc_success_rate"
+        ]
+
+        # Aggregate: mean across seeds for each (lambda, lr, teacher, tau, junction) combo
+        aggregated = df_all.groupby(grouping_cols, as_index=False)[metric_cols].mean()
+
+        print(f"\nLoaded {len(all_rows)} total runs from {len(seed_dirs)} seed directories")
+        print(f"Averaged to {len(aggregated)} unique hyperparameter combinations")
+
+        return aggregated
 
     def _normalize_columns(self):
         self.df["lambda"] = self.df["lambda"].round(3)
@@ -584,9 +644,11 @@ def main():
                         help="Directory containing aggregate_results.csv and per-run subdirectories.")
     parser.add_argument("--output-dir", default="smallgridsweep_figures",
                         help="Directory to save plots.")
+    parser.add_argument("--junction-filter", type=int, default=None, choices=[7, 20],
+                        help="Filter to only plot data from specified junction count (7 or 20).")
     args = parser.parse_args()
 
-    plotter = SmallGridSweepPlotter(args.results_dir, args.output_dir)
+    plotter = SmallGridSweepPlotter(args.results_dir, args.output_dir, args.junction_filter)
     plotter.run_all()
 
 

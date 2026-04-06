@@ -32,10 +32,8 @@ from corridors import MazeGraph
 # -----------------------------
 # Fixed experiment settings
 # -----------------------------
-SEED = 103
 GRAPH_LENGTH = 8
 GRAPH_WIDTH = 8
-CORRIDOR_VAL = 1.0
 FIXED_START_NODE = (0, 0)
 GOAL_IS_DEADEND = True
 
@@ -50,6 +48,14 @@ LR_VALUES = [1.4e-4, 3e-4, 6e-4]
 TEACHER_VALUES = [3.0, 6.5, 10.0]
 TAU_VALUES = [0.2, 0.4, 0.6]
 
+# Corridor and seed sweep settings
+CORRIDOR_CONFIGS = [
+    # (0.0, 20),  # corridor=0.0 should have exactly 20 junction nodes
+    (1.0, 7),  # corridor=1.0 should have exactly 7 junction nodes
+]
+NUM_SEEDS_PER_CORRIDOR = 5
+BASE_SEED = 100
+
 # Other trainer / mechanism defaults
 GAMMA = 0.99
 ENTROPY_COEF = 0.0
@@ -63,7 +69,62 @@ HARD_TEACHER_FORCE = False
 MEMORY_CONSULTATION_COST = 0.0
 MEMORY_CORRECTION_COST = 0.0
 
-OUTDIR = Path("smallgridsweep")
+def count_junction_nodes(graph):
+    """
+    Count the number of junction nodes (degree >= 3) in a graph.
+
+    Parameters:
+    -----------
+    graph : nx.Graph
+        The maze graph
+
+    Returns:
+    --------
+    int
+        Number of nodes with degree >= 3
+    """
+    return sum(1 for node in graph.nodes() if graph.degree(node) >= 3)
+
+
+def find_valid_seed(corridor, target_junctions, start_seed, max_attempts=100):
+    """
+    Find a seed that produces a maze with the target number of junction nodes.
+
+    Parameters:
+    -----------
+    corridor : float
+        Corridor parameter for maze generation
+    target_junctions : int
+        Desired number of junction nodes (degree >= 3)
+    start_seed : int
+        Starting seed to try
+    max_attempts : int
+        Maximum number of seeds to try
+
+    Returns:
+    --------
+    tuple of (int, int)
+        (seed, actual_junction_count) that meets the target
+
+    Raises:
+    -------
+    ValueError
+        If no valid seed found within max_attempts
+    """
+    for attempt in range(max_attempts):
+        seed = start_seed + attempt
+        maze = MazeGraph(length=GRAPH_LENGTH, width=GRAPH_WIDTH, corridor=corridor, seed=seed)
+        graph = maze.get_graph()
+        junction_count = count_junction_nodes(graph)
+
+        if junction_count == target_junctions:
+            print(f"  Found valid seed {seed} with {junction_count} junctions (corridor={corridor})")
+            return seed, junction_count
+
+    raise ValueError(
+        f"Could not find seed with {target_junctions} junctions for corridor={corridor} "
+        f"after {max_attempts} attempts (tried seeds {start_seed} to {start_seed + max_attempts - 1})"
+    )
 
 
 def set_all_seeds(seed: int) -> None:
@@ -311,7 +372,7 @@ def run_test_policy(env, network, slow_memory, tau, consultation_temperature, te
     }
 
 
-def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
+def run_single_config(lambda_, lr, teacher_coef, tau, corridor, seed, outdir):
     # Prevent PyTorch from spawning multiple threads per process
     torch.set_num_threads(1)
 
@@ -320,20 +381,20 @@ def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 100)
-    print(f"RUN: {run_name}")
+    print(f"RUN: {run_name} | corridor={corridor} | seed={seed}")
     print("=" * 100)
 
-    set_all_seeds(SEED)
+    set_all_seeds(seed)
 
     # Create maze and environment
-    maze = MazeGraph(length=GRAPH_LENGTH, width=GRAPH_WIDTH, corridor=CORRIDOR_VAL, seed=SEED)
+    maze = MazeGraph(length=GRAPH_LENGTH, width=GRAPH_WIDTH, corridor=corridor, seed=seed)
     graph = maze.get_graph()
 
     env = MazeEnvironment(
         length=GRAPH_LENGTH,
         width=GRAPH_WIDTH,
-        corridor=CORRIDOR_VAL,
-        seed=SEED,
+        corridor=corridor,
+        seed=seed,
         control_cost=0.0,
         fixed_start_node=FIXED_START_NODE,
         goal_is_deadend=GOAL_IS_DEADEND,
@@ -579,10 +640,10 @@ def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
 
     run_record = {
         "config": {
-            "seed": SEED,
+            "seed": seed,
             "graph_length": GRAPH_LENGTH,
             "graph_width": GRAPH_WIDTH,
-            "corridor_val": CORRIDOR_VAL,
+            "corridor_val": corridor,
             "fixed_start_node": FIXED_START_NODE,
             "goal_is_deadend": GOAL_IS_DEADEND,
             "num_episodes": NUM_EPISODES,
@@ -650,10 +711,12 @@ def run_single_config(lambda_, lr, teacher_coef, tau, outdir):
 
 
 def main():
-    OUTDIR.mkdir(parents=True, exist_ok=True)
+    # Base output directory
+    base_outdir = Path("smallgridsweep")
+    base_outdir.mkdir(parents=True, exist_ok=True)
 
-    # Generate all config combinations
-    configs = [
+    # Generate hyperparameter configs (to be run in parallel)
+    hyperparameter_configs = [
         (lambda_, lr, teacher_coef, tau)
         for lambda_ in LAMBDA_VALUES
         for lr in LR_VALUES
@@ -661,41 +724,72 @@ def main():
         for tau in TAU_VALUES
     ]
 
-    total_runs = len(configs)
+    num_hyperparameter_configs = len(hyperparameter_configs)
     num_cores = cpu_count()
 
     print("=" * 100)
-    print(f"PARALLEL GRID SWEEP")
-    print(f"Total configs: {total_runs}")
+    print(f"PARALLEL GRID SWEEP WITH CORRIDOR AND SEED LOOPS")
+    print(f"Hyperparameter configs per seed: {num_hyperparameter_configs}")
+    print(f"Corridor configs: {len(CORRIDOR_CONFIGS)}")
+    print(f"Seeds per corridor: {NUM_SEEDS_PER_CORRIDOR}")
+    print(f"Total seed directories: {len(CORRIDOR_CONFIGS) * NUM_SEEDS_PER_CORRIDOR}")
+    print(f"Total runs: {len(CORRIDOR_CONFIGS) * NUM_SEEDS_PER_CORRIDOR * num_hyperparameter_configs}")
     print(f"Available CPU cores: {num_cores}")
-    print(f"Running in parallel using multiprocessing Pool")
     print("=" * 100)
     print()
 
-    # Run all configs in parallel
-    # Need to add OUTDIR to each config tuple for starmap
-    configs_with_outdir = [(l, lr, tc, t, OUTDIR) for l, lr, tc, t in configs]
+    # Outer loops: corridor and seed
+    for corridor, target_junctions in CORRIDOR_CONFIGS:
+        print(f"\n{'=' * 100}")
+        print(f"CORRIDOR={corridor} (target: {target_junctions} junctions)")
+        print(f"{'=' * 100}\n")
 
-    with Pool() as pool:
-        all_results = pool.starmap(run_single_config, configs_with_outdir)
+        for seed_idx in range(NUM_SEEDS_PER_CORRIDOR):
+            start_seed = BASE_SEED + seed_idx * 100
 
-    # Write aggregate results
-    csv_path = OUTDIR / "aggregate_results.csv"
-    fieldnames = list(all_results[0].keys())
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_results)
+            # Find a valid seed with the target junction count
+            print(f"\nFinding valid seed for corridor={corridor}, target_junctions={target_junctions}...")
+            seed, junction_count = find_valid_seed(corridor, target_junctions, start_seed)
 
-    # Also save a JSON copy
-    with open(OUTDIR / "aggregate_results.json", "w") as f:
-        json.dump(all_results, f, indent=2)
+            # Create output directory for this seed
+            seed_outdir = base_outdir / f"smallgridsweep_{junction_count}j_seed{seed}"
+            seed_outdir.mkdir(parents=True, exist_ok=True)
 
-    print()
-    print("=" * 100)
-    print("Sweep complete.")
-    print(f"Saved aggregate CSV to: {OUTDIR / 'aggregate_results.csv'}")
-    print(f"Saved aggregate JSON to: {OUTDIR / 'aggregate_results.json'}")
+            print(f"\n{'-' * 100}")
+            print(f"Running sweep for: corridor={corridor}, seed={seed}, junctions={junction_count}")
+            print(f"Output directory: {seed_outdir}")
+            print(f"{'-' * 100}\n")
+
+            # Prepare hyperparameter configs with corridor and seed
+            configs_with_params = [
+                (lambda_, lr, teacher_coef, tau, corridor, seed, seed_outdir)
+                for lambda_, lr, teacher_coef, tau in hyperparameter_configs
+            ]
+
+            # Run all hyperparameter configs in parallel for this seed
+            with Pool() as pool:
+                all_results = pool.starmap(run_single_config, configs_with_params)
+
+            # Write aggregate results for this seed
+            csv_path = seed_outdir / "aggregate_results.csv"
+            fieldnames = list(all_results[0].keys())
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(all_results)
+
+            # Also save a JSON copy
+            with open(seed_outdir / "aggregate_results.json", "w") as f:
+                json.dump(all_results, f, indent=2)
+
+            print(f"\n{'-' * 100}")
+            print(f"Completed sweep for seed {seed}")
+            print(f"Saved results to: {seed_outdir}")
+            print(f"{'-' * 100}\n")
+
+    print("\n" + "=" * 100)
+    print("ENTIRE SWEEP COMPLETE")
+    print(f"All results saved under: {base_outdir}")
     print("=" * 100)
 
 

@@ -122,13 +122,17 @@ def make_intersection(num_arms, arm_length, seed=None):
 
 # Configuration for procedural topologies
 PROCEDURAL_TOPOLOGIES = {
-    '0.0 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.0},
-    '0.2 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.2},
-    '0.3 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.3},
-    '0.4 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.4},
-    '0.6 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.6},
-    '0.9 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 0.9},
-    '1.0 corridor': {'type': 'procedural', 'length': 4, 'width': 6, 'corridor': 1.0},
+    '0.0 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.0},
+    '0.1 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.1},
+    '0.2 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.2},
+    '0.3 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.3},
+    '0.4 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.4},
+    '0.5 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.5},
+    '0.6 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.6},
+    '0.7 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.7},
+    '0.8 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.8},
+    '0.9 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 0.9},
+    '1.0 corridor': {'type': 'procedural', 'length': 8, 'width': 8, 'corridor': 1.0},
 }
 
 # Combined topology catalog
