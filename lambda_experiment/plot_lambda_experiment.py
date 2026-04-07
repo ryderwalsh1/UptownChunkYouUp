@@ -38,7 +38,7 @@ TOPOLOGY_COLORS = sns.color_palette("Set2", 8)
 class LambdaExperimentPlotter:
     """Main plotting class for lambda experiment analysis."""
 
-    def __init__(self, results_dir, output_dir='figures', learning_curve_window=200):
+    def __init__(self, results_dir, output_dir='figures', learning_curve_window=200, num_bins=4):
         """
         Initialize plotter with results directory.
 
@@ -55,6 +55,7 @@ class LambdaExperimentPlotter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
         self.learning_curve_window = learning_curve_window
+        self.num_bins = num_bins
 
         # Load all data
         print(f"Loading data from {self.results_dir}...")
@@ -71,7 +72,7 @@ class LambdaExperimentPlotter:
         print(f"  Lambda values: {sorted(self.df['lambda'].unique())}")
         print(f"  Seeds: {sorted(self.df['seed'].unique())}")
 
-    def _compute_graph_bins(self, num_bins=4):
+    def _compute_graph_bins(self):
         """
         Compute bins for individual graphs based on junction density.
 
@@ -79,6 +80,7 @@ class LambdaExperimentPlotter:
         """
         # Get unique (topology, seed) combinations with their junction density
         graph_info = []
+        num_bins = self.num_bins
         for (topology, seed), group in self.df.groupby(['topology', 'seed']):
             # Junction density should be constant for a given (topology, seed)
             junc_density = group.iloc[0]['topo_junction_density']
@@ -212,7 +214,7 @@ class LambdaExperimentPlotter:
         subdir = 'learning'
 
         # Compute graph bins
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
 
         lambda_values = sorted(self.df['lambda'].unique())
@@ -420,7 +422,7 @@ class LambdaExperimentPlotter:
             return
 
         # Get graph bins
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
         lambda_values = sorted(self.df['lambda'].unique())
 
@@ -638,22 +640,105 @@ class LambdaExperimentPlotter:
             print("  Warning: No AUC results. Skipping optimal lambda analysis.")
             return
 
-        # Compute optimal lambda for each topology (based on AUC)
+        # Compute optimal lambda for each (topology, seed) combination using composite metric
         optimal_lambdas = []
 
-        for topology in self.df['topology'].unique():
-            topo_auc = self.auc_results[self.auc_results['topology'] == topology]
-            avg_auc = topo_auc.groupby('lambda')['auc'].mean()
-            best_lambda = avg_auc.idxmax()
-            best_auc = avg_auc.max()
+        for (topology, seed) in self.df.groupby(['topology', 'seed']).groups.keys():
+            # Get per-lambda metrics for this specific graph
+            graph_data = self.df[
+                (self.df['topology'] == topology) &
+                (self.df['seed'] == seed)
+            ]
 
-            # Get topology metrics
-            topo_data = self.df[self.df['topology'] == topology].iloc[0]
+            # Get AUC results for this specific graph
+            graph_auc = self.auc_results[
+                (self.auc_results['topology'] == topology) &
+                (self.auc_results['seed'] == seed)
+            ]
+
+            if len(graph_auc) == 0:
+                continue
+
+            # Compute composite optimal score for each lambda
+            composite_scores = []
+            for lambda_val in sorted(graph_data['lambda'].unique()):
+                # Filter to final 20% of episodes for stable metrics
+                lambda_data = graph_data[graph_data['lambda'] == lambda_val]
+                num_episodes = len(lambda_data)
+                final_episodes = lambda_data.iloc[int(0.8 * num_episodes):]
+
+                # Get AUC for this lambda
+                lambda_auc = graph_auc[graph_auc['lambda'] == lambda_val]
+                if len(lambda_auc) == 0:
+                    continue
+                auc = lambda_auc['auc'].values[0]
+
+                # Compute normalized AUC (0-1 scale relative to this graph's range)
+                auc_range = graph_auc['auc'].max() - graph_auc['auc'].min()
+                if auc_range > 0:
+                    auc_norm = (auc - graph_auc['auc'].min()) / auc_range
+                else:
+                    auc_norm = 1.0
+
+                # Get final performance metrics (mean over final 20% of training)
+                junction_acc = final_episodes['junction_accuracy'].mean()
+                consultation_rate = final_episodes['consultation_rate'].mean()
+                wrong_turn_rate = final_episodes['wrong_turn_rate'].mean()
+
+                # Get credit assignment metric (mean over successful episodes in final 20%)
+                success_final = final_episodes[final_episodes['success'] == True]
+                if len(success_final) > 0:
+                    jc_ratio = success_final['junction_corridor_ratio'].mean()
+                    # Normalize junction/corridor ratio: clamp extreme values
+                    jc_ratio_clamped = np.clip(jc_ratio, 0, 2)
+                    jc_ratio_norm = jc_ratio_clamped / 2.0
+                else:
+                    jc_ratio_norm = 0.0
+
+                # Handle NaN values
+                junction_acc = junction_acc if not np.isnan(junction_acc) else 0.0
+                consultation_rate = consultation_rate if not np.isnan(consultation_rate) else 1.0
+                wrong_turn_rate = wrong_turn_rate if not np.isnan(wrong_turn_rate) else 1.0
+
+                # Compute composite score
+                composite_score = (
+                    0.30 * auc_norm +
+                    0.25 * junction_acc +
+                    0.20 * (1 - consultation_rate) +
+                    0.15 * (1 - wrong_turn_rate) +
+                    0.10 * jc_ratio_norm
+                )
+
+                composite_scores.append({
+                    'lambda': lambda_val,
+                    'composite_score': composite_score,
+                    'auc': auc,
+                    'auc_norm': auc_norm,
+                    'junction_acc': junction_acc,
+                    'consultation_rate': consultation_rate,
+                    'wrong_turn_rate': wrong_turn_rate,
+                    'jc_ratio_norm': jc_ratio_norm
+                })
+
+            if len(composite_scores) == 0:
+                continue
+
+            # Find best lambda based on composite score
+            composite_df = pd.DataFrame(composite_scores)
+            best_idx = composite_df['composite_score'].idxmax()
+            best_row = composite_df.loc[best_idx]
+            best_lambda = best_row['lambda']
+            best_score = best_row['composite_score']
+
+            # Get topology metrics for this graph
+            topo_data = graph_data.iloc[0]
 
             optimal_lambdas.append({
                 'topology': topology,
+                'seed': seed,
                 'optimal_lambda': best_lambda,
-                'best_auc': best_auc,
+                'best_composite_score': best_score,
+                'best_auc': best_row['auc'],
                 'mean_corridor_length': topo_data['topo_mean_corridor_length'],
                 'junction_density': topo_data['topo_junction_density'],
                 'frac_corridors': topo_data['topo_frac_corridors'],
@@ -662,107 +747,152 @@ class LambdaExperimentPlotter:
 
         opt_df = pd.DataFrame(optimal_lambdas)
 
+        # Extract corridor parameter from topology name (e.g., "0.3_corridor" -> 0.3)
+        opt_df['corridor_param'] = opt_df['topology'].str.extract(r'([\d.]+)').astype(float)
+
+        # Define corridor-dominated regime threshold
+        CORRIDOR_THRESHOLD = 0.6
+        opt_df['regime'] = opt_df['corridor_param'].apply(
+            lambda x: 'corridor-dominated' if x >= CORRIDOR_THRESHOLD else 'junction-dominated'
+        )
+
+        # Split data by regime
+        corridor_dom = opt_df[opt_df['regime'] == 'corridor-dominated']
+        junction_dom = opt_df[opt_df['regime'] == 'junction-dominated']
+
         # Create 2x2 panel of regression plots
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-        # 1. Lambda* vs mean corridor length
+        # Create colormap for corridor parameter
+        corridor_params = opt_df['corridor_param'].values
+        norm = plt.Normalize(vmin=corridor_params.min(), vmax=corridor_params.max())
+
+        # ===== TOP ROW: Full dataset with regime highlighting =====
+
+        # 1. Lambda* vs mean corridor length (all data + regime-specific regressions)
         ax = axes[0, 0]
-        x = opt_df['mean_corridor_length']
-        y = opt_df['optimal_lambda']
 
-        ax.scatter(x, y, s=100, alpha=0.7, c=range(len(opt_df)), cmap='tab10')
+        # Plot all points colored by regime
+        scatter_junc = ax.scatter(junction_dom['mean_corridor_length'], junction_dom['optimal_lambda'],
+                                 s=50, alpha=0.4, c='lightgray', edgecolors='red', linewidths=1.5,
+                                 label='Junction-dominated (excluded)')
+        scatter_corr = ax.scatter(corridor_dom['mean_corridor_length'], corridor_dom['optimal_lambda'],
+                                 s=50, alpha=0.7, c=corridor_dom['corridor_param'], cmap='plasma',
+                                 edgecolors='black', linewidths=0.5)
 
-        # Add regression line
-        if len(x) > 1:
+        # Add regression line for corridor-dominated regime only
+        if len(corridor_dom) > 1:
+            x = corridor_dom['mean_corridor_length']
+            y = corridor_dom['optimal_lambda']
             slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
             line_x = np.array([x.min(), x.max()])
             line_y = slope * line_x + intercept
             ax.plot(line_x, line_y, 'r--', linewidth=2, alpha=0.7,
-                   label=f'R²={r_value**2:.3f}, p={p_value:.3f}')
+                   label=f'Corridor-dom: R²={r_value**2:.3f}, p={p_value:.3f}')
 
         ax.set_xlabel('Mean Corridor Length')
         ax.set_ylabel('Optimal λ*')
         ax.set_title('Corridor Hypothesis: λ* vs Corridor Length')
         ax.grid(alpha=0.3)
-        ax.legend()
-
-        # Annotate points
-        for idx, row in opt_df.iterrows():
-            ax.annotate(row['topology'], (row['mean_corridor_length'], row['optimal_lambda']),
-                       fontsize=7, alpha=0.7, xytext=(3, 3), textcoords='offset points')
+        ax.legend(fontsize=9)
 
         # 2. Lambda* vs junction density
         ax = axes[0, 1]
-        x = opt_df['junction_density']
-        y = opt_df['optimal_lambda']
 
-        ax.scatter(x, y, s=100, alpha=0.7, c=range(len(opt_df)), cmap='tab10')
+        ax.scatter(junction_dom['junction_density'], junction_dom['optimal_lambda'],
+                  s=50, alpha=0.4, c='lightgray', edgecolors='red', linewidths=1.5,
+                  label='Junction-dominated (excluded)')
+        ax.scatter(corridor_dom['junction_density'], corridor_dom['optimal_lambda'],
+                  s=50, alpha=0.7, c=corridor_dom['corridor_param'], cmap='plasma',
+                  edgecolors='black', linewidths=0.5)
 
-        if len(x) > 1:
+        if len(corridor_dom) > 1:
+            x = corridor_dom['junction_density']
+            y = corridor_dom['optimal_lambda']
             slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
             line_x = np.array([x.min(), x.max()])
             line_y = slope * line_x + intercept
             ax.plot(line_x, line_y, 'r--', linewidth=2, alpha=0.7,
-                   label=f'R²={r_value**2:.3f}, p={p_value:.3f}')
+                   label=f'Corridor-dom: R²={r_value**2:.3f}, p={p_value:.3f}')
 
         ax.set_xlabel('Junction Density')
         ax.set_ylabel('Optimal λ*')
         ax.set_title('Junction Hypothesis: λ* vs Junction Density')
         ax.grid(alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=9)
 
-        for idx, row in opt_df.iterrows():
-            ax.annotate(row['topology'], (row['junction_density'], row['optimal_lambda']),
-                       fontsize=7, alpha=0.7, xytext=(3, 3), textcoords='offset points')
+        # ===== BOTTOM ROW: Additional analyses =====
 
         # 3. Lambda* vs corridor fraction
         ax = axes[1, 0]
-        x = opt_df['frac_corridors']
-        y = opt_df['optimal_lambda']
 
-        ax.scatter(x, y, s=100, alpha=0.7, c=range(len(opt_df)), cmap='tab10')
+        ax.scatter(junction_dom['frac_corridors'], junction_dom['optimal_lambda'],
+                  s=50, alpha=0.4, c='lightgray', edgecolors='red', linewidths=1.5,
+                  label='Junction-dominated (excluded)')
+        scatter = ax.scatter(corridor_dom['frac_corridors'], corridor_dom['optimal_lambda'],
+                           s=50, alpha=0.7, c=corridor_dom['corridor_param'], cmap='plasma',
+                           edgecolors='black', linewidths=0.5)
 
-        if len(x) > 1:
+        if len(corridor_dom) > 1:
+            x = corridor_dom['frac_corridors']
+            y = corridor_dom['optimal_lambda']
             slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
             line_x = np.array([x.min(), x.max()])
             line_y = slope * line_x + intercept
             ax.plot(line_x, line_y, 'r--', linewidth=2, alpha=0.7,
-                   label=f'R²={r_value**2:.3f}, p={p_value:.3f}')
+                   label=f'Corridor-dom: R²={r_value**2:.3f}, p={p_value:.3f}')
 
         ax.set_xlabel('Fraction of Corridor Nodes')
         ax.set_ylabel('Optimal λ*')
         ax.set_title('λ* vs Corridor Fraction')
         ax.grid(alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=9)
 
-        for idx, row in opt_df.iterrows():
-            ax.annotate(row['topology'], (row['frac_corridors'], row['optimal_lambda']),
-                       fontsize=7, alpha=0.7, xytext=(3, 3), textcoords='offset points')
-
-        # 4. Summary bar chart of optimal lambdas
+        # 4. Regime validity plot: Composite score vs corridor parameter
         ax = axes[1, 1]
-        topologies = opt_df['topology']
-        optimal_vals = opt_df['optimal_lambda']
 
-        bars = ax.barh(range(len(topologies)), optimal_vals,
-                      color=TOPOLOGY_COLORS[:len(topologies)])
-        ax.set_yticks(range(len(topologies)))
-        ax.set_yticklabels(topologies)
-        ax.set_xlabel('Optimal λ*')
-        ax.set_title('Optimal λ* by Topology')
-        ax.set_xlim(0, 1)
-        ax.grid(alpha=0.3, axis='x')
+        # Show optimal lambda for each corridor parameter
+        regime_summary = opt_df.groupby('corridor_param').agg({
+            'optimal_lambda': 'mean',
+            'best_composite_score': 'mean'
+        }).reset_index()
 
-        # Add value labels on bars
-        for i, (bar, val) in enumerate(zip(bars, optimal_vals)):
-            ax.text(val + 0.02, i, f'{val:.2f}', va='center', fontsize=9)
+        ax2 = ax.twinx()
 
+        # Plot optimal lambda
+        line1 = ax.plot(regime_summary['corridor_param'], regime_summary['optimal_lambda'],
+                       'o-', linewidth=2, markersize=8, color='steelblue', label='Optimal λ*')
+        # Plot composite score
+        line2 = ax2.plot(regime_summary['corridor_param'], regime_summary['best_composite_score'],
+                        's--', linewidth=2, markersize=8, color='orange', alpha=0.7, label='Composite Score')
+
+        # Mark regime threshold
+        ax.axvline(x=CORRIDOR_THRESHOLD, color='red', linestyle=':', linewidth=2, alpha=0.5,
+                  label=f'Regime threshold ({CORRIDOR_THRESHOLD})')
+
+        ax.set_xlabel('Corridor Parameter')
+        ax.set_ylabel('Optimal λ*', color='steelblue')
+        ax2.set_ylabel('Best Composite Score', color='orange')
+        ax.set_title('Regime Validity: λ* vs Topology Parameter')
+        ax.tick_params(axis='y', labelcolor='steelblue')
+        ax2.tick_params(axis='y', labelcolor='orange')
+        ax.grid(alpha=0.3)
+
+        # Combine legends
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc='upper left')
+
+        # Add colorbar
         plt.tight_layout()
+        cbar = fig.colorbar(scatter, ax=axes, orientation='vertical', fraction=0.02, pad=0.04)
+        cbar.set_label('Corridor Parameter', rotation=270, labelpad=20)
+
         self._save_fig(fig, 'optimal_lambda_analysis', subdir)
         plt.close()
 
-        # Additional plot: Performance landscape binned by junction density
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        # Additional plot: Performance landscape binned by junction density (using composite score)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
 
         fig, axes = plt.subplots(1, num_bins, figsize=(5*num_bins, 5))
@@ -774,31 +904,79 @@ class LambdaExperimentPlotter:
             bin_graphs = graph_bins[graph_bins['bin_id'] == bin_id]
             bin_label = bin_graphs.iloc[0]['bin_label']
 
-            # Collect AUC data for all graphs in this bin
-            bin_auc_list = []
+            # Collect composite scores for all graphs in this bin
+            bin_composite_scores = []
             for _, graph_row in bin_graphs.iterrows():
                 topology = graph_row['topology']
                 seed = graph_row['seed']
 
+                # Find this graph's composite scores in optimal_lambdas
+                graph_opt = [ol for ol in optimal_lambdas if ol['topology'] == topology and ol['seed'] == seed]
+                if len(graph_opt) == 0:
+                    continue
+
+                # Recompute composite scores for all lambdas for this graph (already done above, use same logic)
+                graph_data = self.df[
+                    (self.df['topology'] == topology) &
+                    (self.df['seed'] == seed)
+                ]
                 graph_auc = self.auc_results[
                     (self.auc_results['topology'] == topology) &
                     (self.auc_results['seed'] == seed)
                 ]
 
-                if len(graph_auc) > 0:
-                    bin_auc_list.append(graph_auc)
+                for lambda_val in sorted(graph_data['lambda'].unique()):
+                    lambda_data = graph_data[graph_data['lambda'] == lambda_val]
+                    num_episodes = len(lambda_data)
+                    final_episodes = lambda_data.iloc[int(0.8 * num_episodes):]
 
-            if len(bin_auc_list) == 0:
+                    lambda_auc = graph_auc[graph_auc['lambda'] == lambda_val]
+                    if len(lambda_auc) == 0:
+                        continue
+                    auc = lambda_auc['auc'].values[0]
+
+                    auc_range = graph_auc['auc'].max() - graph_auc['auc'].min()
+                    auc_norm = (auc - graph_auc['auc'].min()) / auc_range if auc_range > 0 else 1.0
+
+                    junction_acc = final_episodes['junction_accuracy'].mean()
+                    consultation_rate = final_episodes['consultation_rate'].mean()
+                    wrong_turn_rate = final_episodes['wrong_turn_rate'].mean()
+
+                    success_final = final_episodes[final_episodes['success'] == True]
+                    if len(success_final) > 0:
+                        jc_ratio = success_final['junction_corridor_ratio'].mean()
+                        jc_ratio_norm = np.clip(jc_ratio, 0, 2) / 2.0
+                    else:
+                        jc_ratio_norm = 0.0
+
+                    junction_acc = junction_acc if not np.isnan(junction_acc) else 0.0
+                    consultation_rate = consultation_rate if not np.isnan(consultation_rate) else 1.0
+                    wrong_turn_rate = wrong_turn_rate if not np.isnan(wrong_turn_rate) else 1.0
+
+                    composite_score = (
+                        0.30 * auc_norm +
+                        0.25 * junction_acc +
+                        0.20 * (1 - consultation_rate) +
+                        0.15 * (1 - wrong_turn_rate) +
+                        0.10 * jc_ratio_norm
+                    )
+
+                    bin_composite_scores.append({
+                        'lambda': lambda_val,
+                        'composite_score': composite_score
+                    })
+
+            if len(bin_composite_scores) == 0:
                 continue
 
-            bin_auc = pd.concat(bin_auc_list)
+            bin_composite_df = pd.DataFrame(bin_composite_scores)
 
             # Get mean and std across all graphs in bin
-            auc_stats = bin_auc.groupby('lambda')['auc'].agg(['mean', 'std', 'count'])
-            lambdas = auc_stats.index
-            means = auc_stats['mean']
-            stds = auc_stats['std']
-            ns = auc_stats['count']
+            composite_stats = bin_composite_df.groupby('lambda')['composite_score'].agg(['mean', 'std', 'count'])
+            lambdas = composite_stats.index
+            means = composite_stats['mean']
+            stds = composite_stats['std']
+            ns = composite_stats['count']
 
             ci = 1.96 * stds / np.sqrt(ns)
 
@@ -811,7 +989,7 @@ class LambdaExperimentPlotter:
                       alpha=0.7, label=f'Optimal λ*={best_idx:.1f}')
 
             ax.set_xlabel('Lambda (λ)')
-            ax.set_ylabel('AUC')
+            ax.set_ylabel('Composite Score')
             ax.set_title(bin_label)
             ax.grid(alpha=0.3)
             ax.legend()
@@ -840,7 +1018,7 @@ class LambdaExperimentPlotter:
         lambda_values = sorted(success_df['lambda'].unique())
 
         # 1. Effective credit distance vs lambda (binned by junction density)
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
 
         # Create single plot with one curve per bin
@@ -1057,7 +1235,7 @@ class LambdaExperimentPlotter:
         subdir = 'decision_quality'
 
         # Compute graph bins
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
 
         # Create colormap for bins
@@ -1304,8 +1482,11 @@ class LambdaExperimentPlotter:
         self._save_fig(fig, 'node_type_composition', subdir)
         plt.close()
 
-        # 2. Key topology metrics panel
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        # 2. Key topology metrics panel (with spatial homogeneity if available)
+        has_homogeneity = 'topo_spatial_homogeneity' in topo_samples.columns
+        num_panels = 4 if has_homogeneity else 3
+
+        fig, axes = plt.subplots(1, num_panels, figsize=(5*num_panels, 5))
 
         # Mean corridor length
         ax = axes[0]
@@ -1338,21 +1519,56 @@ class LambdaExperimentPlotter:
         ax.grid(alpha=0.3, axis='x')
         ax.set_xlim(0, 1)
 
+        # Spatial homogeneity (if available)
+        if has_homogeneity:
+            ax = axes[3]
+            spatial_homog = topo_samples.set_index('topology')['topo_spatial_homogeneity']
+            bars = ax.barh(range(len(topologies)), spatial_homog, color=TOPOLOGY_COLORS[:len(topologies)])
+            ax.set_yticks(range(len(topologies)))
+            ax.set_yticklabels([])
+            ax.set_xlabel('Spatial Homogeneity')
+            ax.set_title('Spatial Homogeneity by Topology')
+            ax.grid(alpha=0.3, axis='x')
+            ax.set_xlim(0, 1)
+
         plt.tight_layout()
         self._save_fig(fig, 'topology_metrics_panel', subdir)
         plt.close()
 
         # 3. Correlation matrix of topology descriptors
-        topo_features = topo_samples[[
+        # Build feature list, checking for availability of new metrics
+        topo_feature_cols = [
             'topo_mean_corridor_length',
             'topo_junction_density',
             'topo_frac_corridors',
             'topo_frac_junctions'
-        ]]
+        ]
 
-        corr_matrix = topo_features.corr()
+        # Add new metrics if available (backwards compatibility)
+        if 'topo_mean_global_corr_dec_ratio' in topo_samples.columns:
+            topo_feature_cols.append('topo_mean_global_corr_dec_ratio')
+        if 'topo_spatial_homogeneity' in topo_samples.columns:
+            topo_feature_cols.append('topo_spatial_homogeneity')
 
-        fig, ax = plt.subplots(figsize=(8, 7))
+        topo_features = topo_samples[topo_feature_cols]
+
+        # Rename columns for better display
+        rename_map = {
+            'topo_mean_corridor_length': 'Mean Corridor Length',
+            'topo_junction_density': 'Junction Density',
+            'topo_frac_corridors': 'Corridor Fraction',
+            'topo_frac_junctions': 'Junction Fraction',
+            'topo_mean_global_corr_dec_ratio': 'Global Corr/Dec Ratio',
+            'topo_spatial_homogeneity': 'Spatial Homogeneity'
+        }
+
+        # Only rename columns that exist
+        rename_map_filtered = {k: v for k, v in rename_map.items() if k in topo_features.columns}
+        topo_features_renamed = topo_features.rename(columns=rename_map_filtered)
+
+        corr_matrix = topo_features_renamed.corr()
+
+        fig, ax = plt.subplots(figsize=(10, 8))
         sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm',
                    center=0, vmin=-1, vmax=1, square=True, ax=ax,
                    cbar_kws={'label': 'Correlation'})
@@ -1361,6 +1577,82 @@ class LambdaExperimentPlotter:
         plt.tight_layout()
         self._save_fig(fig, 'topology_correlation_matrix', subdir)
         plt.close()
+
+        # 4. Spatial homogeneity by corridor parameter (if available)
+        if 'topo_spatial_homogeneity' in self.df.columns:
+            # Group all data by topology and seed to get full distribution
+            homog_data = self.df.groupby(['topology', 'seed']).first().reset_index()
+
+            # Extract corridor parameter from topology name
+            homog_data['corridor_param'] = homog_data['topology'].str.extract(r'([\d.]+)').astype(float)
+
+            # Create bins of corridor parameter
+            bins = [0.0, 0.3, 0.5, 0.7, 1.0]
+            bin_labels = ['0.0-0.3', '0.3-0.5', '0.5-0.7', '0.7-1.0']
+            homog_data['corridor_bin'] = pd.cut(homog_data['corridor_param'],
+                                                bins=bins,
+                                                labels=bin_labels,
+                                                include_lowest=True)
+
+            # Compute statistics per bin
+            bin_stats = homog_data.groupby('corridor_bin').agg({
+                'topo_spatial_homogeneity': ['mean', 'std', 'count'],
+                'topo_junction_density': 'mean'
+            }).reset_index()
+
+            # Flatten column names
+            bin_stats.columns = ['corridor_bin', 'homog_mean', 'homog_std', 'count', 'junc_density']
+
+            # Create figure with two subplots
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+            # Left: Bar plot of homogeneity by corridor bin
+            ax = axes[0]
+            x_pos = np.arange(len(bin_stats))
+
+            bars = ax.bar(x_pos, bin_stats['homog_mean'], yerr=bin_stats['homog_std'],
+                         capsize=5, alpha=0.7, color='steelblue', edgecolor='black')
+
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(bin_stats['corridor_bin'])
+            ax.set_xlabel('Corridor Parameter Range')
+            ax.set_ylabel('Spatial Homogeneity')
+            ax.set_title('Spatial Homogeneity by Corridor Parameter')
+            ax.set_ylim(0, 1)
+            ax.grid(alpha=0.3, axis='y')
+
+            # Add count labels on bars
+            for i, (bar, count) in enumerate(zip(bars, bin_stats['count'])):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                       f'n={int(count)}', ha='center', va='bottom', fontsize=9)
+
+            # Right: Scatter plot of homogeneity vs junction density
+            ax = axes[1]
+
+            # Color by corridor parameter
+            scatter = ax.scatter(homog_data['topo_junction_density'],
+                               homog_data['topo_spatial_homogeneity'],
+                               c=homog_data['corridor_param'],
+                               cmap='plasma',
+                               s=50,
+                               alpha=0.6,
+                               edgecolors='black',
+                               linewidths=0.5)
+
+            ax.set_xlabel('Junction Density')
+            ax.set_ylabel('Spatial Homogeneity')
+            ax.set_title('Spatial Homogeneity vs Junction Density')
+            ax.set_ylim(0, 1)
+            ax.grid(alpha=0.3)
+
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=ax)
+            cbar.set_label('Corridor Parameter', rotation=270, labelpad=20)
+
+            plt.tight_layout()
+            self._save_fig(fig, 'spatial_homogeneity_analysis', subdir)
+            plt.close()
 
     # =========================================================================
     # FIGURE 7: Detailed Diagnostics
@@ -1432,7 +1724,7 @@ class LambdaExperimentPlotter:
         plt.close()
 
         # 2. Value estimates over training (binned by junction density)
-        graph_bins = self._compute_graph_bins(num_bins=4)
+        graph_bins = self._compute_graph_bins()
         num_bins = graph_bins['bin_id'].nunique()
 
         fig, axes = plt.subplots(1, num_bins, figsize=(5*num_bins, 5))
@@ -1632,7 +1924,7 @@ def main():
         figures = [f.strip() for f in args.figures.split(',')]
 
     # Create plotter and generate figures
-    plotter = LambdaExperimentPlotter(args.results_dir, args.output_dir)
+    plotter = LambdaExperimentPlotter(args.results_dir, args.output_dir, num_bins=6)
     plotter.plot_all(figures=figures)
 
     print("\n✓ Plotting complete!")
