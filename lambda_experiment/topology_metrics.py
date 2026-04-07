@@ -7,6 +7,7 @@ their decision structure and credit assignment demands.
 
 import networkx as nx
 import numpy as np
+from scipy.spatial.distance import jensenshannon
 
 
 def compute_node_types(graph):
@@ -192,7 +193,234 @@ def compute_corr_dec_ratio(graph, start, goal):
     }
 
 
-def compute_all_metrics(graph, start=None, goal=None):
+def compute_global_corr_dec_ratio(graph):
+    """
+    Compute average corridor-to-decision ratio across all dead-end pairs.
+
+    This provides a global, topology-wide measure of credit assignment demand
+    that is independent of any specific start-goal pair.
+
+    Parameters:
+    -----------
+    graph : nx.Graph
+        Maze graph
+
+    Returns:
+    --------
+    metrics : dict
+        Dictionary with:
+        - mean_global_corr_dec_ratio: average R_corr/dec across all dead-end pairs
+        - median_global_corr_dec_ratio: median ratio
+        - std_global_corr_dec_ratio: standard deviation
+        - num_dead_end_pairs: number of pairs analyzed
+    """
+    # Find all dead-end nodes (degree == 1)
+    dead_ends = [node for node in graph.nodes() if graph.degree(node) == 1]
+
+    if len(dead_ends) < 2:
+        # Not enough dead-ends to compute pairs
+        return {
+            'mean_global_corr_dec_ratio': 0.0,
+            'median_global_corr_dec_ratio': 0.0,
+            'std_global_corr_dec_ratio': 0.0,
+            'num_dead_end_pairs': 0,
+        }
+
+    # Compute corridor/decision ratio for all unique dead-end pairs
+    ratios = []
+    epsilon = 1e-6
+
+    for i in range(len(dead_ends)):
+        for j in range(i + 1, len(dead_ends)):
+            start = dead_ends[i]
+            goal = dead_ends[j]
+
+            # Check if path exists
+            if not nx.has_path(graph, start, goal):
+                continue
+
+            # Get shortest path
+            path = nx.shortest_path(graph, start, goal)
+
+            # Count corridor and junction nodes on path
+            num_corridor = 0
+            num_junction = 0
+
+            for node in path:
+                degree = graph.degree(node)
+                if degree == 2:
+                    num_corridor += 1
+                elif degree >= 3:
+                    num_junction += 1
+
+            # Compute ratio
+            ratio = num_corridor / (num_junction + epsilon)
+            ratios.append(ratio)
+
+    if len(ratios) == 0:
+        return {
+            'mean_global_corr_dec_ratio': 0.0,
+            'median_global_corr_dec_ratio': 0.0,
+            'std_global_corr_dec_ratio': 0.0,
+            'num_dead_end_pairs': 0,
+        }
+
+    return {
+        'mean_global_corr_dec_ratio': np.mean(ratios),
+        'median_global_corr_dec_ratio': np.median(ratios),
+        'std_global_corr_dec_ratio': np.std(ratios),
+        'num_dead_end_pairs': len(ratios),
+    }
+
+
+def compute_spatial_homogeneity(graph, maze, window_size=3):
+    """
+    Compute spatial homogeneity using overlapping window analysis.
+
+    Measures whether the maze has consistent local topology composition throughout
+    (homogeneous) vs. patchy regions with different mixtures (heterogeneous).
+
+    Algorithm:
+    1. Slide 4×4 window across maze with stride=1
+    2. Compute composition vector [dead_end_frac, corridor_frac, junction_frac] per window
+    3. Compute mean composition across all windows
+    4. For each window, compute Jensen-Shannon divergence from mean
+    5. Average JS divergence = heterogeneity
+    6. Return homogeneity = 1 - heterogeneity_normalized
+
+    Parameters:
+    -----------
+    graph : nx.Graph
+        Maze graph with (x,y) tuple nodes
+    maze : MazeGraph
+        Original maze object (for dimensions)
+    window_size : int
+        Size of sliding window (default: 4)
+
+    Returns:
+    --------
+    metrics : dict
+        - spatial_homogeneity: homogeneity score [0, 1], 1=homogeneous, 0=heterogeneous
+        - spatial_heterogeneity: raw heterogeneity score (mean JS divergence)
+        - num_windows: number of windows analyzed
+    """
+    # Check if nodes are 2D grid coordinates
+    sample_nodes = list(graph.nodes())[:5]
+    if not all(isinstance(n, tuple) and len(n) == 2 for n in sample_nodes):
+        # Not a 2D grid graph, cannot compute spatial metrics
+        return {
+            'spatial_homogeneity': 1.0,  # Default to homogeneous if not grid
+            'spatial_heterogeneity': 0.0,
+            'num_windows': 0
+        }
+
+    # Get maze dimensions
+    max_x = max(node[0] for node in graph.nodes())
+    max_y = max(node[1] for node in graph.nodes())
+
+    # Collect compositions from all overlapping windows
+    window_compositions = []
+
+    # Slide window across maze (stride=1 for full overlap)
+    for start_x in range(max_x - window_size + 2):  # +2 to include boundary
+        for start_y in range(max_y - window_size + 2):
+            # Define window bounds
+            end_x = start_x + window_size
+            end_y = start_y + window_size
+
+            # Get nodes in this window
+            window_nodes = [
+                node for node in graph.nodes()
+                if isinstance(node, tuple) and len(node) == 2
+                and start_x <= node[0] < end_x
+                and start_y <= node[1] < end_y
+            ]
+
+            if len(window_nodes) < 3:  # Skip tiny windows
+                continue
+
+            # Count node types in window
+            num_dead_ends = sum(1 for n in window_nodes if graph.degree(n) == 1)
+            num_corridors = sum(1 for n in window_nodes if graph.degree(n) == 2)
+            num_junctions = sum(1 for n in window_nodes if graph.degree(n) >= 3)
+
+            total = len(window_nodes)
+
+            # Composition vector (probability distribution)
+            composition = np.array([
+                num_dead_ends / total,
+                num_corridors / total,
+                num_junctions / total
+            ])
+
+            window_compositions.append(composition)
+
+    if len(window_compositions) < 2:
+        # Not enough windows
+        return {
+            'spatial_homogeneity': 1.0,
+            'spatial_heterogeneity': 0.0,
+            'num_windows': len(window_compositions)
+        }
+
+    # Compute mean composition across all windows
+    mean_composition = np.mean(window_compositions, axis=0)
+
+    # Method 1: Jensen-Shannon divergence (distribution-based)
+    js_divergences = []
+    for composition in window_compositions:
+        # Add small epsilon to avoid log(0)
+        eps = 1e-10
+        comp_safe = composition + eps
+        mean_safe = mean_composition + eps
+
+        # Normalize to ensure valid probability distributions
+        comp_safe = comp_safe / comp_safe.sum()
+        mean_safe = mean_safe / mean_safe.sum()
+
+        # jensenshannon returns sqrt of JS divergence, so square it
+        js_div = jensenshannon(comp_safe, mean_safe) ** 2
+        js_divergences.append(js_div)
+
+    # Use 95th percentile instead of mean for more sensitivity
+    # This makes the metric more discriminatory - even one very different region matters
+    heterogeneity_js = np.percentile(js_divergences, 95)
+
+    # Method 2: Standard deviation of composition components (variance-based)
+    # More sensitive to local variations than JS divergence
+    window_comps_array = np.array(window_compositions)
+
+    # Compute std for each composition dimension: [dead_end, corridor, junction]
+    std_dead_end = np.std(window_comps_array[:, 0])
+    std_corridor = np.std(window_comps_array[:, 1])
+    std_junction = np.std(window_comps_array[:, 2])
+
+    # Theoretical max std for a binary [0,1] variable is 0.5 (at 50/50 split)
+    # Normalize by this to get [0,1] range
+    max_theoretical_std = 0.5
+    heterogeneity_std = np.mean([
+        std_dead_end / max_theoretical_std,
+        std_corridor / max_theoretical_std,
+        std_junction / max_theoretical_std
+    ])
+
+    # Combined heterogeneity: weighted average of both methods
+    # Std-based is more sensitive, so weight it higher
+    heterogeneity = 0.3 * heterogeneity_js + 0.7 * heterogeneity_std
+
+    # Homogeneity = 1 - heterogeneity
+    homogeneity = 1.0 - heterogeneity
+
+    return {
+        'spatial_homogeneity': homogeneity,
+        'spatial_heterogeneity': heterogeneity,
+        'spatial_heterogeneity_js': heterogeneity_js,
+        'spatial_heterogeneity_std': heterogeneity_std,
+        'num_windows': len(window_compositions)
+    }
+
+
+def compute_all_metrics(graph, start=None, goal=None, maze=None):
     """
     Compute all topology metrics.
 
@@ -204,6 +432,8 @@ def compute_all_metrics(graph, start=None, goal=None):
         Start node for path-dependent metrics
     goal : node, optional
         Goal node for path-dependent metrics
+    maze : MazeGraph, optional
+        Original maze object (needed for spatial metrics)
 
     Returns:
     --------
@@ -216,6 +446,11 @@ def compute_all_metrics(graph, start=None, goal=None):
     metrics.update(compute_node_types(graph))
     metrics.update(compute_mean_corridor_length(graph))
     metrics['junction_density'] = compute_junction_density(graph)
+    metrics.update(compute_global_corr_dec_ratio(graph))
+
+    # Spatial homogeneity metrics (if maze object provided)
+    if maze is not None:
+        metrics.update(compute_spatial_homogeneity(graph, maze))
 
     # Path-dependent metrics (if start and goal provided)
     if start is not None and goal is not None:

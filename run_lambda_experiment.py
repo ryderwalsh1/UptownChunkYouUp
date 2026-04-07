@@ -81,7 +81,7 @@ def run_single_configuration(topology_name, lambda_val, seed, config):
     graph = maze.get_graph()
 
     # Compute topology metrics (path-independent)
-    topo_metrics = compute_all_metrics(graph)
+    topo_metrics = compute_all_metrics(graph, maze=maze)
 
     # Create environment
     env = MazeEnvironment(
@@ -372,6 +372,11 @@ def run_single_configuration(topology_name, lambda_val, seed, config):
             'topo_frac_junctions': topo_metrics['frac_junctions'],
             'topo_mean_corridor_length': topo_metrics['mean_corridor_length'],
             'topo_junction_density': topo_metrics['junction_density'],
+            'topo_mean_global_corr_dec_ratio': topo_metrics['mean_global_corr_dec_ratio'],
+            'topo_median_global_corr_dec_ratio': topo_metrics['median_global_corr_dec_ratio'],
+            'topo_std_global_corr_dec_ratio': topo_metrics['std_global_corr_dec_ratio'],
+            'topo_spatial_homogeneity': topo_metrics.get('spatial_homogeneity', 1.0),
+            'topo_spatial_heterogeneity': topo_metrics.get('spatial_heterogeneity', 0.0),
             # Path-specific metrics
             'path_num_corridor_nodes': path_metrics['num_corridor_nodes_on_path'],
             'path_num_junction_nodes': path_metrics['num_junction_nodes_on_path'],
@@ -815,7 +820,7 @@ def main():
             '0.9 corridor',
             '1.0 corridor',
         ],
-        'lr': 'adaptive',  # Use 2D interpolation based on lambda and junction density
+        'lr': 3e-4,
         'gamma': 0.99,
         'entropy_coef': 0.01,
         'teacher_coef': 10.0, 
