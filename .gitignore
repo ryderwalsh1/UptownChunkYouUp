@@ -16,7 +16,15 @@ __pycache__/
 results/
 lambda_experiment_results*/
 figures/
+figures_adaptivelr/
+figures_lr3e-4/
 test_figures/
+smallgridsweep/
+smallgridsweep_figures_7j/
+smallgridsweep_figures_20j/
+hyperparameter_interpolation/
+elementary_topology_results/
+elementary_topology_plots/
 
 # pnl
 pnl-show_graph-output/
@@ -29,3 +37,6 @@ checkpoints/
 
 # videos
 trajectory\ videos/
+
+# markdowns
+*.md
