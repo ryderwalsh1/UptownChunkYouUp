@@ -877,6 +877,294 @@ class ElementaryTopologyPlotter:
         print(f"All figures saved to: {self.output_dir}/corridor/")
         print("="*80)
 
+    def plot_lambda_regime_shift_comparison(self):
+        """
+        Create central comparison figure showing lambda regime shift between
+        alternating and switching training schemes.
+
+        This figure demonstrates that low-λ (local credit assignment) outperforms
+        mid-λ in switching schemes when episodic memory is available and task
+        structure changes abruptly.
+
+        Creates a 3-panel figure:
+        - Panel A: Heatmap comparison of final performance
+        - Panel B: Time-series for representative topology showing regime shift
+        - Panel C: Corridor length dependency of low-λ advantage
+        """
+        print("\n" + "="*80)
+        print("Generating Lambda Regime Shift Comparison Figure")
+        print("="*80)
+
+        # Load both training schemes
+        print("\nLoading alternating scheme data...")
+        self.load_branch_data('branch_alternating')
+        if self.branch_data is None:
+            print("Error: Failed to load alternating data")
+            return
+        alternating_data = self.branch_data.copy()
+
+        print("\nLoading switching scheme data...")
+        self.load_branch_data('branch_switch')
+        if self.branch_data is None:
+            print("Error: Failed to load switching data")
+            return
+        switching_data = self.branch_data.copy()
+
+        # Create figure with 3 panels
+        fig = plt.figure(figsize=(18, 14))
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1, 1], hspace=0.35, wspace=0.3)
+
+        # === PANEL A: Heatmap Comparison ===
+        print("\nGenerating Panel A: Performance heatmaps...")
+        ax_heat_alt = fig.add_subplot(gs[0, 0])
+        ax_heat_switch = fig.add_subplot(gs[0, 1])
+
+        # Compute final performance (last 100 episodes average) for each scheme
+        final_window = 100
+
+        for ax, data, scheme_name in [(ax_heat_alt, alternating_data, 'Alternating'),
+                                       (ax_heat_switch, switching_data, 'Switching')]:
+            # Get final episodes
+            max_episode = data['episode'].max()
+
+            # For switching scheme, only use episodes AFTER the switch (second half)
+            # For alternating scheme, use last 100 episodes as before
+            if scheme_name == 'Switching':
+                # Switch happens at midpoint, use last 100 episodes after switch
+                switch_point = max_episode // 2
+                final_data = data[data['episode'] >= (max_episode - final_window)]
+            else:
+                final_data = data[data['episode'] >= (max_episode - final_window)]
+
+            # Compute mean reward for each (pre, post, lambda) combination
+            perf_matrix = np.zeros((len(self.branch_pre_lengths),
+                                   len(self.branch_post_lengths),
+                                   len(sorted(data['lambda'].unique()))))
+
+            lambda_values = sorted(data['lambda'].unique())
+
+            for i, pre_len in enumerate(self.branch_pre_lengths):
+                for j, post_len in enumerate(self.branch_post_lengths):
+                    for k, lambda_val in enumerate(lambda_values):
+                        subset = final_data[
+                            (final_data['pre_branch_length'] == pre_len) &
+                            (final_data['post_branch_length'] == post_len) &
+                            (final_data['lambda'] == lambda_val)
+                        ]
+                        if len(subset) > 0:
+                            perf_matrix[i, j, k] = subset['episode_reward'].mean()
+
+            # For each (pre, post), find which lambda performs best
+            best_lambda_idx = np.argmax(perf_matrix, axis=2)
+            best_lambda_map = np.zeros((len(self.branch_pre_lengths),
+                                       len(self.branch_post_lengths)))
+
+            for i in range(len(self.branch_pre_lengths)):
+                for j in range(len(self.branch_post_lengths)):
+                    best_lambda_map[i, j] = lambda_values[best_lambda_idx[i, j]]
+
+            # Plot heatmap
+            im = ax.imshow(best_lambda_map, cmap='plasma', aspect='auto',
+                          vmin=0, vmax=1.0, origin='lower')
+
+            # Annotate with actual lambda values
+            for i in range(len(self.branch_pre_lengths)):
+                for j in range(len(self.branch_post_lengths)):
+                    text_color = 'white' if best_lambda_map[i, j] > 0.5 else 'black'
+                    ax.text(j, i, f'{best_lambda_map[i, j]:.1f}',
+                           ha='center', va='center', color=text_color,
+                           fontsize=11, weight='bold')
+
+            ax.set_xticks(range(len(self.branch_post_lengths)))
+            ax.set_xticklabels([f'{x}' for x in self.branch_post_lengths])
+            ax.set_yticks(range(len(self.branch_pre_lengths)))
+            ax.set_yticklabels([f'{x}' for x in self.branch_pre_lengths])
+            ax.set_xlabel('Post-Branch Corridor Length', fontsize=12, weight='bold')
+            ax.set_ylabel('Pre-Branch Corridor Length', fontsize=12, weight='bold')
+            ax.set_title(f'{scheme_name} Scheme\nOptimal λ by Topology',
+                        fontsize=13, weight='bold')
+
+        # Add panel labels
+        ax_heat_alt.text(-0.15, 1.05, 'A', transform=ax_heat_alt.transAxes,
+                        fontsize=18, weight='bold', va='top')
+        ax_heat_switch.text(-0.15, 1.05, 'B', transform=ax_heat_switch.transAxes,
+                        fontsize=18, weight='bold', va='top')
+
+        # Add colorbar
+        cbar = fig.colorbar(im, ax=[ax_heat_alt, ax_heat_switch],
+                           orientation='horizontal', pad=0.08, aspect=40)
+        cbar.set_label('Optimal λ Value', fontsize=11, weight='bold')
+
+        # === PANEL B: Time-Series Comparison ===
+        print("\nGenerating Panel B: Recovery dynamics...")
+        ax_timeseries = fig.add_subplot(gs[1, :])
+
+        # Select representative topology (Pre=8, Post=8 shows strongest effect)
+        rep_pre, rep_post = 8, 8
+
+        # Define lambda regimes
+        lambda_regimes = {
+            'Low-λ (0.0-0.2)': [0.0, 0.1, 0.2],
+            'Mid-λ (0.5-0.7)': [0.5, 0.6, 0.7],
+            'High-λ (0.9-1.0)': [0.9, 1.0]
+        }
+
+        regime_colors = {'Low-λ (0.0-0.2)': '#2E86AB',
+                        'Mid-λ (0.5-0.7)': '#A23B72',
+                        'High-λ (0.9-1.0)': '#F18F01'}
+
+        window = self.learning_curve_window
+
+        for regime_name, regime_lambdas in lambda_regimes.items():
+            for scheme_data, scheme_name, linestyle in [(alternating_data, 'Alternating', '--'),
+                                                         (switching_data, 'Switching', '-')]:
+                # Filter for representative topology and lambda regime
+                subset = scheme_data[
+                    (scheme_data['pre_branch_length'] == rep_pre) &
+                    (scheme_data['post_branch_length'] == rep_post) &
+                    (scheme_data['lambda'].isin(regime_lambdas))
+                ]
+
+                if len(subset) == 0:
+                    continue
+
+                # Compute mean reward across regime lambdas and seeds
+                grouped = subset.groupby('episode')['episode_reward'].agg(['mean', 'std', 'count'])
+                episodes = grouped.index.to_numpy()
+                mean = grouped['mean']
+                std = grouped['std'].fillna(0)
+                n = grouped['count']
+                ci = 1.96 * std / np.sqrt(n)
+
+                # Smooth
+                mean_smooth = self._running_average(mean, window)
+                ci_smooth = self._running_average(ci, window)
+
+                color = regime_colors[regime_name]
+                alpha = 0.9 if linestyle == '-' else 0.5
+                linewidth = 2.5 if linestyle == '-' else 2.0
+
+                label = f'{regime_name} ({scheme_name})'
+                ax_timeseries.plot(episodes, mean_smooth, label=label,
+                                  color=color, linestyle=linestyle,
+                                  linewidth=linewidth, alpha=alpha)
+
+                if linestyle == '-':  # Only shade switching scheme
+                    ax_timeseries.fill_between(episodes,
+                                               mean_smooth - ci_smooth,
+                                               mean_smooth + ci_smooth,
+                                               color=color, alpha=0.15)
+
+        # Mark the switch point
+        max_episode = switching_data['episode'].max()
+        switch_point = max_episode // 2
+        ax_timeseries.axvline(x=switch_point, color='red', linestyle=':',
+                             linewidth=2, alpha=0.7, label='Target Switch')
+
+        ax_timeseries.set_xlabel('Episode', fontsize=12, weight='bold')
+        ax_timeseries.set_ylabel(f'Episode Reward\n({window}-ep running avg)',
+                                fontsize=12, weight='bold')
+        ax_timeseries.set_title(f'Recovery Dynamics (Pre={rep_pre}, Post={rep_post})',
+                               fontsize=13, weight='bold')
+        ax_timeseries.grid(alpha=0.3, linewidth=0.5)
+        ax_timeseries.legend(ncol=3, fontsize=9, loc='lower left')
+
+        # Add panel label
+        ax_timeseries.text(-0.08, 1.05, 'C', transform=ax_timeseries.transAxes,
+                          fontsize=18, weight='bold', va='top')
+
+        # === PANEL C: Corridor Length Dependency ===
+        print("\nGenerating Panel C: Corridor length dependency...")
+        ax_dependency = fig.add_subplot(gs[2, :])
+
+        # Compute performance advantage of low-λ over mid-λ in switching scheme
+        # Advantage = (low-λ final reward) - (mid-λ final reward)
+
+        final_window = 100
+        max_episode = switching_data['episode'].max()
+        final_switching = switching_data[switching_data['episode'] >= (max_episode - final_window)]
+
+        low_lambdas = [0.0, 0.1, 0.2]
+        mid_lambdas = [0.5, 0.6, 0.7]
+
+        # For each (pre, post), compute advantage
+        advantages = []
+
+        for pre_len in self.branch_pre_lengths:
+            for post_len in self.branch_post_lengths:
+                # Low-λ performance
+                low_data = final_switching[
+                    (final_switching['pre_branch_length'] == pre_len) &
+                    (final_switching['post_branch_length'] == post_len) &
+                    (final_switching['lambda'].isin(low_lambdas))
+                ]
+
+                # Mid-λ performance
+                mid_data = final_switching[
+                    (final_switching['pre_branch_length'] == pre_len) &
+                    (final_switching['post_branch_length'] == post_len) &
+                    (final_switching['lambda'].isin(mid_lambdas))
+                ]
+
+                if len(low_data) > 0 and len(mid_data) > 0:
+                    low_reward = low_data['episode_reward'].mean()
+                    mid_reward = mid_data['episode_reward'].mean()
+                    advantage = low_reward - mid_reward
+
+                    advantages.append({
+                        'pre': pre_len,
+                        'post': post_len,
+                        'advantage': advantage
+                    })
+
+        adv_df = pd.DataFrame(advantages)
+
+        # Plot as grouped bar chart
+        post_colors_dep = plt.cm.viridis(np.linspace(0.2, 0.8, len(self.branch_post_lengths)))
+        x = np.arange(len(self.branch_pre_lengths))
+        width = 0.25
+
+        for i, post_len in enumerate(self.branch_post_lengths):
+            post_data = adv_df[adv_df['post'] == post_len]
+            if len(post_data) == 0:
+                continue
+
+            # Sort by pre length to match x positions
+            post_data = post_data.sort_values('pre')
+            advantages_arr = post_data['advantage'].values
+
+            offset = width * (i - 1)  # Center the bars
+            ax_dependency.bar(x + offset, advantages_arr, width,
+                            label=f'Post={post_len}',
+                            color=post_colors_dep[i], alpha=0.8)
+
+        ax_dependency.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.3)
+        ax_dependency.set_xlabel('Pre-Branch Corridor Length', fontsize=12, weight='bold')
+        ax_dependency.set_ylabel('Low-λ Advantage over Mid-λ\n(Δ Reward)',
+                                fontsize=12, weight='bold')
+        ax_dependency.set_title('Corridor Length Modulation of Low-λ Advantage (Switching Scheme)',
+                               fontsize=13, weight='bold')
+        ax_dependency.set_xticks(x)
+        ax_dependency.set_xticklabels([f'{pre}' for pre in self.branch_pre_lengths])
+        ax_dependency.legend(fontsize=10, loc='upper left', ncol=3)
+        ax_dependency.grid(alpha=0.3, linewidth=0.5, axis='y')
+
+        # Add panel label
+        ax_dependency.text(-0.08, 1.05, 'D', transform=ax_dependency.transAxes,
+                          fontsize=18, weight='bold', va='top')
+
+        # Add main title
+        fig.suptitle('Lambda Regime Shift: Low-λ Outperforms Mid-λ in Switching Schemes with Episodic Memory',
+                    fontsize=15, weight='bold', y=0.995)
+
+        # Save figure
+        self._save_fig(fig, 'lambda_regime_shift_comparison', 'branch')
+        plt.close()
+
+        print("\n" + "="*80)
+        print(f"Central figure saved to: {self.output_dir}/branch/lambda_regime_shift_comparison.png")
+        print("="*80)
+
     def plot_all_branch(self, training_scheme):
         """
         Generate all branch topology plots for a specific training scheme.
@@ -924,7 +1212,7 @@ def main():
     parser.add_argument('--output-dir', type=str, default='elementary_topology_plots',
                        help='Output directory for figures (default: elementary_topology_plots/)')
     parser.add_argument('--topology-family', type=str, default='corridor',
-                       help='Topology family to plot. Options: corridor, branch_alternating, branch_switch (default: corridor)')
+                       help='Topology family to plot. Options: corridor, branch_alternating, branch_switch, regime_shift (default: corridor)')
 
     args = parser.parse_args()
 
@@ -940,9 +1228,13 @@ def main():
         plotter.plot_all_branch(args.topology_family)
         print("\n✓ Plotting complete!")
         print(f"  View figures in: {plotter.output_dir}/branch/{args.topology_family}/")
+    elif args.topology_family == 'regime_shift':
+        plotter.plot_lambda_regime_shift_comparison()
+        print("\n✓ Plotting complete!")
+        print(f"  View figures in: {plotter.output_dir}/branch/")
     else:
         print(f"Error: Unknown topology family '{args.topology_family}'")
-        print("Available families: corridor, branch_alternating, branch_switch")
+        print("Available families: corridor, branch_alternating, branch_switch, regime_shift")
         return
 
 
