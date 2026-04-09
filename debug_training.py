@@ -22,12 +22,12 @@ def test_single_training_run():
     print("=" * 80)
 
     # Set seeds for reproducibility
-    seed = 101
-    graph_length = 5
-    graph_width = 5
-    corridor_val = 0.5
+    seed = 103
+    graph_length = 8
+    graph_width = 8
+    corridor_val = 1.0
     fixed_start_node = (0, 0)
-    goal_is_deadend = False
+    goal_is_deadend = True
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -73,20 +73,20 @@ def test_single_training_run():
     # Create trainer for fast network
     trainer = FastNetworkTrainer(
         network=network,
-        lr=5e-4,  # Reduced from 1e-3 for stability (was causing oscillations)
+        lr=6e-4,
         gamma=0.99,
-        lambda_=0.9,
-        entropy_coef=0.01,  # Increased from 0.001 to maintain exploration
-        teacher_coef=10.0,
-        value_coef=0.5  # Reduced from 1.0
+        lambda_=0.6,
+        entropy_coef=0.0,
+        teacher_coef=3,
+        value_coef=0.5
     )
 
     # Entropy-gated memory consultation parameters
-    tau = 0.3  # Threshold entropy for memory consultation
+    tau = 0.6  # Threshold entropy for memory consultation
     consultation_temperature = 0.5  # Temperature for sigmoid gating
     hard_teacher_force = False  # Whether to correct wrong policy samples
-    memory_consultation_cost = 0.5  # Reward penalty for consulting memory
-    memory_correction_cost = 1.0  # Reward penalty for being corrected by memory
+    memory_consultation_cost = 0.0  # Reward penalty for consulting memory
+    memory_correction_cost = 0.0  # Reward penalty for being corrected by memory
 
     # Training metrics
     rewards_history = []
@@ -99,7 +99,7 @@ def test_single_training_run():
     correction_rate_history = []
     memory_cost_history = []
 
-    num_episodes = 10000  # Faster test
+    num_episodes = 3000
 
     print(f"\nTraining for {num_episodes} episodes...")
     print("-" * 80)
@@ -195,7 +195,11 @@ def test_single_training_run():
 
             # Get log probability for the action we're storing
             action_tensor = torch.tensor([action_to_take], dtype=torch.long)
-            log_prob = network.get_log_prob(action_logits, action_tensor)
+            # Use memory logits if teacher forcing, otherwise use fast network logits
+            if teacher_force_this_step:
+                log_prob = network.get_log_prob(memory_action_logits, action_tensor)
+            else:
+                log_prob = network.get_log_prob(action_logits, action_tensor)
 
             # Store trajectory
             trajectory['states'].append(torch.tensor(state['current_encoding']))
@@ -268,12 +272,12 @@ def test_single_training_run():
                   f"PLoss: {loss_dict['policy_loss']:7.4f} | VLoss: {loss_dict['value_loss']:7.4f}")
 
             # Extra detail for first few episodes
-            if episode < 5:
-                print(f"       Rewards in episode: {trajectory['rewards']}")
-                print(f"       Actions taken: {trajectory['actions']}")
-                print(f"       Optimal path length: {optimal_length}")
-                print(f"       Consultation rate: {consultation_rate:.3f}, Correction rate: {correction_rate:.3f}")
-                print(f"       Memory cost: {episode_memory_cost:.3f}")
+            print(f"       Rewards in episode: {trajectory['rewards']}")
+            print(f"       Actions taken: {trajectory['actions']}")
+            print(f"       Entropies: {trajectory['policy_entropies']}")
+            print(f"       Optimal path length: {optimal_length}")
+            print(f"       Consultation rate: {consultation_rate:.3f}, Correction rate: {correction_rate:.3f}")
+            print(f"       Memory cost: {episode_memory_cost:.3f}")
 
     print("\n" + "=" * 80)
     print("Training Summary")
@@ -417,8 +421,8 @@ def test_single_training_run():
     print("=" * 80)
 
     test_episodes = 10
-    print("\n--- Greedy Policy (argmax) ---")
-    greedy_successes = 0
+    print("\n--- Policy with Memory Consultation (same as training) ---")
+    test_successes = 0
     for ep in range(test_episodes):
         state = env.reset()
         network.reset_hidden(batch_size=1)
@@ -428,26 +432,45 @@ def test_single_training_run():
             state_encoding = torch.tensor(state['current_encoding'], dtype=torch.float32).unsqueeze(0)
             goal_encoding = torch.tensor(state['goal_encoding'], dtype=torch.float32).unsqueeze(0)
 
-            # Use network with greedy action selection
+            # Use same entropy-gated consultation as training
             with torch.no_grad():
                 action_logits, _, _, _ = network(state_encoding, goal_encoding, network.hidden)
-                action = action_logits.argmax(dim=-1).item()
+                policy_entropy = network.compute_entropy(action_logits).item()
+
+                # Check if at goal
+                at_goal = (state['current_pos'] == state['goal_pos'])
+                if at_goal:
+                    consult_memory = True
+                else:
+                    consultation_logit = (policy_entropy - tau) / consultation_temperature
+                    consultation_prob = torch.sigmoid(torch.tensor(consultation_logit)).item()
+                    consult_memory = np.random.random() < consultation_prob
+
+                # Get memory action
+                memory_action_logits = slow_memory.query(state_encoding, goal_encoding)
+                memory_action_idx = memory_action_logits.argmax().item()
+
+                if consult_memory:
+                    action = memory_action_idx
+                else:
+                    action, _ = network.sample_action(action_logits)
+                    action = action.item()
 
             next_state, reward, done, info = env.step(action, used_slow=False)
             episode_reward += reward
 
             if done:
                 if info['reached_goal']:
-                    greedy_successes += 1
+                    test_successes += 1
                 if ep < 3:  # Only print first few
                     print(f"  Test {ep+1}: Start={state['current_pos']}, Goal={env.goal_pos}, Steps={step+1}, Reward={episode_reward:.2f}, Success={info['reached_goal']}")
                 break
 
             state = next_state
 
-    print(f"\nGreedy success rate: {greedy_successes}/{test_episodes} = {greedy_successes/test_episodes*100:.1f}%")
+    print(f"\nTest success rate: {test_successes}/{test_episodes} = {test_successes/test_episodes*100:.1f}%")
 
-    print("\n--- Sampling Policy (stochastic) ---")
+    print("\n--- Pure Fast Network (no memory, for comparison) ---")
     sample_successes = 0
     for ep in range(test_episodes):
         state = env.reset()

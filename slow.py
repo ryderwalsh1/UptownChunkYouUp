@@ -40,20 +40,27 @@ class SlowMemory:
 
         Parameters:
         -----------
-        maze_graph : networkx.Graph or MazeGraph
-            The maze graph (either NetworkX graph or MazeGraph object)
+        maze_graph : networkx.Graph or MazeGraph or ElementaryMaze
+            The maze graph (either NetworkX graph, MazeGraph object, or ElementaryMaze)
         """
-        # Handle both MazeGraph and raw NetworkX graph
+        # Handle both MazeGraph and ElementaryMaze
         if hasattr(maze_graph, 'get_graph'):
-            # It's a MazeGraph object
+            # It's a MazeGraph or ElementaryMaze object
             from corridors import MazeGraph
             maze = maze_graph
             graph = maze.get_graph()
+
+            # Detect coordinate system
+            # ElementaryMaze uses (x, y) where x=col, y=row
+            # MazeGraph uses (row, col)
+            from lambda_experiment.topology_generators import ElementaryMaze
+            is_elementary = isinstance(maze, ElementaryMaze)
         else:
             # It's a raw NetworkX graph - need to create MazeGraph wrapper
             # This shouldn't happen in normal use, but handle it gracefully
             graph = maze_graph
             maze = None
+            is_elementary = False
 
         # Build shortest path memories - store (source, target) -> direction
         nodes_list = list(graph.nodes())
@@ -81,26 +88,79 @@ class SlowMemory:
                     if len(path) > 1:
                         next_step = path[1]  # The immediate next node
 
-                        # Convert to direction
-                        r_src, c_src = source
-                        r_next, c_next = next_step
+                        # Convert to direction based on coordinate system and topology type
+                        if is_elementary and hasattr(maze, 'topology_type') and maze.topology_type == 'tree':
+                            # Tree topology uses semantic directions with (x, y) coordinates
+                            x_src, y_src = source
+                            x_next, y_next = next_step
+                            dx = x_next - x_src
+                            dy = y_next - y_src
 
-                        dr = r_next - r_src
-                        dc = c_next - c_src
+                            # Tree semantic directions:
+                            if dy < 0:
+                                # Moving up in tree (toward root)
+                                direction = DIRECTION_UP
+                            elif dy > 0:
+                                # Moving down in tree (toward leaves)
+                                if dx < 0:
+                                    direction = DIRECTION_LEFT  # LEFT child
+                                elif dx > 0:
+                                    direction = DIRECTION_RIGHT  # RIGHT child
+                                else:  # dx == 0
+                                    direction = DIRECTION_DOWN  # DOWN (middle child)
+                            else:
+                                # Same level (shouldn't happen in tree)
+                                print(f"Warning: Same-level movement in tree from {source} to {next_step}")
+                                continue
 
-                        # Map to direction
-                        if dr == -1 and dc == 0:
-                            direction = DIRECTION_UP
-                        elif dr == 1 and dc == 0:
-                            direction = DIRECTION_DOWN
-                        elif dr == 0 and dc == -1:
-                            direction = DIRECTION_LEFT
-                        elif dr == 0 and dc == 1:
-                            direction = DIRECTION_RIGHT
+                        elif is_elementary:
+                            # ElementaryMaze uses (x, y) format: x=col, y=row
+                            # Need to swap to get (row, col)
+                            x_src, y_src = source
+                            x_next, y_next = next_step
+
+                            # Convert to (row, col) by swapping
+                            r_src, c_src = y_src, x_src
+                            r_next, c_next = y_next, x_next
+
+                            dr = r_next - r_src
+                            dc = c_next - c_src
+
+                            # Map to direction
+                            if dr == -1 and dc == 0:
+                                direction = DIRECTION_UP
+                            elif dr == 1 and dc == 0:
+                                direction = DIRECTION_DOWN
+                            elif dr == 0 and dc == -1:
+                                direction = DIRECTION_LEFT
+                            elif dr == 0 and dc == 1:
+                                direction = DIRECTION_RIGHT
+                            else:
+                                # Should not happen
+                                print(f"Warning: Invalid direction from {source} to {next_step} (dr={dr}, dc={dc})")
+                                continue
+
                         else:
-                            # Should not happen
-                            print(f"Warning: Invalid direction from {source} to {next_step}")
-                            continue
+                            # MazeGraph uses (row, col) format directly
+                            r_src, c_src = source
+                            r_next, c_next = next_step
+
+                            dr = r_next - r_src
+                            dc = c_next - c_src
+
+                            # Map to direction
+                            if dr == -1 and dc == 0:
+                                direction = DIRECTION_UP
+                            elif dr == 1 and dc == 0:
+                                direction = DIRECTION_DOWN
+                            elif dr == 0 and dc == -1:
+                                direction = DIRECTION_LEFT
+                            elif dr == 0 and dc == 1:
+                                direction = DIRECTION_RIGHT
+                            else:
+                                # Should not happen
+                                print(f"Warning: Invalid direction from {source} to {next_step} (dr={dr}, dc={dc})")
+                                continue
 
                         # Store mapping: (source_idx, target_idx) -> direction
                         source_idx = node_to_idx[source]

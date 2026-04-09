@@ -1578,35 +1578,37 @@ class LambdaExperimentPlotter:
         self._save_fig(fig, 'topology_correlation_matrix', subdir)
         plt.close()
 
-        # 4. Spatial homogeneity by corridor parameter (if available)
+        # 4. Spatial homogeneity by junction density bins (if available)
         if 'topo_spatial_homogeneity' in self.df.columns:
-            # Group all data by topology and seed to get full distribution
-            homog_data = self.df.groupby(['topology', 'seed']).first().reset_index()
+            # Use the same binning logic as _compute_graph_bins()
+            graph_bins = self._compute_graph_bins()
 
-            # Extract corridor parameter from topology name
+            # Merge binning info with full dataframe
+            homog_data = self.df.groupby(['topology', 'seed']).first().reset_index()
+            homog_data = homog_data.merge(graph_bins[['topology', 'seed', 'bin_id', 'bin_label']],
+                                          on=['topology', 'seed'],
+                                          how='left')
+
+            # Extract corridor parameter for coloring
             homog_data['corridor_param'] = homog_data['topology'].str.extract(r'([\d.]+)').astype(float)
 
-            # Create bins of corridor parameter
-            bins = [0.0, 0.3, 0.5, 0.7, 1.0]
-            bin_labels = ['0.0-0.3', '0.3-0.5', '0.5-0.7', '0.7-1.0']
-            homog_data['corridor_bin'] = pd.cut(homog_data['corridor_param'],
-                                                bins=bins,
-                                                labels=bin_labels,
-                                                include_lowest=True)
-
             # Compute statistics per bin
-            bin_stats = homog_data.groupby('corridor_bin').agg({
+            bin_stats = homog_data.groupby('bin_label').agg({
                 'topo_spatial_homogeneity': ['mean', 'std', 'count'],
-                'topo_junction_density': 'mean'
+                'topo_junction_density': 'mean',
+                'corridor_param': 'mean'
             }).reset_index()
 
             # Flatten column names
-            bin_stats.columns = ['corridor_bin', 'homog_mean', 'homog_std', 'count', 'junc_density']
+            bin_stats.columns = ['bin_label', 'homog_mean', 'homog_std', 'count', 'junc_density', 'corridor_mean']
+
+            # Sort by junction density to ensure correct ordering
+            bin_stats = bin_stats.sort_values('junc_density')
 
             # Create figure with two subplots
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-            # Left: Bar plot of homogeneity by corridor bin
+            # Left: Bar plot of homogeneity by junction density bin
             ax = axes[0]
             x_pos = np.arange(len(bin_stats))
 
@@ -1614,10 +1616,10 @@ class LambdaExperimentPlotter:
                          capsize=5, alpha=0.7, color='steelblue', edgecolor='black')
 
             ax.set_xticks(x_pos)
-            ax.set_xticklabels(bin_stats['corridor_bin'])
-            ax.set_xlabel('Corridor Parameter Range')
+            ax.set_xticklabels(bin_stats['bin_label'], rotation=45, ha='right')
+            ax.set_xlabel('Junction Density Range')
             ax.set_ylabel('Spatial Homogeneity')
-            ax.set_title('Spatial Homogeneity by Corridor Parameter')
+            ax.set_title('Spatial Homogeneity by Junction Density')
             ax.set_ylim(0, 1)
             ax.grid(alpha=0.3, axis='y')
 
