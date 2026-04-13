@@ -922,12 +922,12 @@ if __name__ == "__main__":
     goal_is_deadend = True      # True = goals always at dead-ends, False = random goals
     length = 8
     width = 8
-    corridor = 0.5
+    corridor = 0.0
     seed = 60
 
     num_episodes_stage2 = 10000
     log_interval = num_episodes_stage2 // 100
-    save_interval = num_episodes_stage2 // 10
+    save_interval = num_episodes_stage2 // 1
 
     lr_fast = 3e-4
     lr_controller = 1e-3

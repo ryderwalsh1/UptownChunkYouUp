@@ -56,7 +56,7 @@ plt.rcParams['figure.titlesize'] = 14
 class AdaptiveLambdaTrainer:
     """Trainer for full cognitive agent with dynamic lambda modulation."""
 
-    def __init__(self, env, agent, lr_fast=6e-4, lr_controller=1e-3, gamma=0.99):
+    def __init__(self, env, agent, lr_fast=3e-4, lr_controller=1e-3, gamma=0.99):
         """
         Initialize trainer (no Stage 1 pretraining).
 
@@ -82,7 +82,10 @@ class AdaptiveLambdaTrainer:
             agent.fast_network,
             lr=lr_fast,
             gamma=gamma,
-            lambda_=0.95  # Will be modulated dynamically
+            lambda_=0.95,  # Will be modulated dynamically
+            entropy_coef=0.01,
+            value_coef=0.5,
+            teacher_coef=10.0  # Match baseline (very important!)
         )
         self.controller_trainer = MetaControllerTrainer(
             agent.controller,
@@ -420,8 +423,8 @@ def train_adaptive_lambda_comparison(corridor_values=[0.0, 0.5, 1.0], seed=60,
             width=maze_size,
             corridor=corridor,
             seed=seed,
-            control_cost=0.01,  # Control cost for using slow processing
-            fixed_start_node=(0, 0),
+            control_cost=0.2,  # Control cost for using slow processing
+            fixed_start_node=(7, 0),
             goal_is_deadend=True
         )
 
@@ -432,11 +435,11 @@ def train_adaptive_lambda_comparison(corridor_values=[0.0, 0.5, 1.0], seed=60,
             maze_graph=env.graph,
             embedding_dim=64,
             hidden_dim=128,
-            conflict_alpha=0.01,
+            conflict_alpha=0.05,
             lambda_beta=2.0,
             w_long=0.8,
             w_short=0.2,
-            control_cost=0.01,
+            control_cost=0.2,
             fixed_lambda=None  # Enable dynamic lambda modulation
         )
 
@@ -444,7 +447,7 @@ def train_adaptive_lambda_comparison(corridor_values=[0.0, 0.5, 1.0], seed=60,
         trainer = AdaptiveLambdaTrainer(
             env=env,
             agent=agent,
-            lr_fast=6e-4,
+            lr_fast=3e-4,
             lr_controller=1e-3,
             gamma=0.99
         )
