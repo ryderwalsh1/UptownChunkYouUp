@@ -484,6 +484,88 @@ class ElementaryTopologyPlotter:
         self._save_fig(fig, 'auc_vs_lambda', subdir)
         plt.close()
 
+    def plot_corridor_entropy_evolution(self):
+        """
+        Plot evolution of memory call probability during training for corridor topologies.
+
+        Memory call probability = sigmoid((H - tau) / temperature)
+        where H is the policy entropy, tau is the threshold (0.6), and temperature is 0.5.
+
+        Creates 2x3 grid of subplots (one per corridor length).
+        Each subplot shows curves for different lambda values.
+        """
+        if self.corridor_data is None:
+            print("Error: No corridor data loaded. Run load_corridor_data() first.")
+            return
+
+        subdir = 'corridor'
+        lambda_values = sorted(self.corridor_data['lambda'].unique())
+        window = self.learning_curve_window
+
+        # Check if mean_policy_entropy column exists
+        if 'mean_policy_entropy' not in self.corridor_data.columns:
+            print("Warning: 'mean_policy_entropy' column not found. Skipping entropy evolution plot.")
+            return
+
+        # Get tau and temperature from config (default values if not available)
+        tau = 0.6
+        temperature = 0.5
+
+        # Compute memory call probability
+        def sigmoid(x):
+            return 1.0 / (1.0 + np.exp(-x))
+
+        # Create figure with 2x3 subplots
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        axes = axes.flatten()
+
+        for length_idx, length in enumerate(self.corridor_lengths):
+            if length_idx >= len(axes):
+                break
+            ax = axes[length_idx]
+            length_data = self.corridor_data[self.corridor_data['corridor_length'] == length]
+
+            for lambda_idx, lambda_val in enumerate(lambda_values):
+                lambda_data = length_data[length_data['lambda'] == lambda_val]
+
+                if len(lambda_data) == 0:
+                    continue
+
+                # Compute memory call probability from entropy
+                lambda_data = lambda_data.copy()
+                lambda_data['memory_call_prob'] = sigmoid(
+                    (lambda_data['mean_policy_entropy'] - tau) / temperature
+                )
+
+                # Group by episode and compute statistics
+                grouped = lambda_data.groupby('episode')['memory_call_prob'].agg(['mean', 'std', 'count'])
+                episodes = grouped.index.to_numpy()
+                mean = grouped['mean']
+                std = grouped['std'].fillna(0)
+                n = grouped['count']
+                ci = 1.96 * std / np.sqrt(n)
+
+                # Smooth
+                mean_smooth = self._running_average(mean, window)
+                ci_smooth = self._running_average(ci, window)
+
+                color = LAMBDA_COLORS[lambda_idx % len(LAMBDA_COLORS)]
+                ax.plot(episodes, mean_smooth, label=f'λ={lambda_val:.1f}',
+                        color=color, linewidth=1.5, alpha=0.8)
+                ax.fill_between(episodes, mean_smooth - ci_smooth, mean_smooth + ci_smooth,
+                                color=color, alpha=0.15)
+
+            ax.set_xlabel('Episode')
+            ax.set_ylabel(f'Memory Call Probability\n({window}-ep running avg)')
+            ax.set_title(f'Corridor Length {length}')
+            ax.grid(alpha=0.3, linewidth=0.5)
+            ax.set_ylim(-0.05, 1.05)
+            ax.legend(ncol=2, fontsize=8)
+
+        plt.tight_layout()
+        self._save_fig(fig, 'memory_call_probability_evolution', subdir)
+        plt.close()
+
     def plot_value_estimates_per_node(self):
         """
         Plot final value estimates for each node position.
@@ -847,6 +929,106 @@ class ElementaryTopologyPlotter:
         self._save_fig(fig, 'auc_vs_lambda', subdir)
         plt.close()
 
+    def plot_branch_entropy_evolution(self, training_scheme):
+        """
+        Plot evolution of memory call probability during training for branch topologies.
+
+        Memory call probability = sigmoid((H - tau) / temperature)
+        where H is the policy entropy, tau is the threshold (0.6), and temperature is 0.5.
+
+        Creates 3x3 grid of subplots:
+        - Rows: pre_branch_length (2, 5, 8)
+        - Cols: post_branch_length (2, 5, 8)
+
+        Each subplot shows curves for different lambda values.
+
+        Parameters:
+        -----------
+        training_scheme : str
+            Training scheme name for subdirectory organization
+        """
+        if self.branch_data is None:
+            print("Error: No branch data loaded. Run load_branch_data() first.")
+            return
+
+        subdir = f'branch/{training_scheme}'
+        lambda_values = sorted(self.branch_data['lambda'].unique())
+        window = self.learning_curve_window
+
+        # Check if mean_policy_entropy column exists
+        if 'mean_policy_entropy' not in self.branch_data.columns:
+            print("Warning: 'mean_policy_entropy' column not found. Skipping entropy evolution plot.")
+            return
+
+        # Get tau and temperature from config (default values if not available)
+        tau = 0.6
+        temperature = 0.5
+
+        # Compute memory call probability
+        def sigmoid(x):
+            return 1.0 / (1.0 + np.exp(-x))
+
+        # Create figure with 3x3 subplots
+        fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+
+        for pre_idx, pre_len in enumerate(self.branch_pre_lengths):
+            for post_idx, post_len in enumerate(self.branch_post_lengths):
+                ax = axes[pre_idx, post_idx]
+
+                # Filter data for this specific branch configuration
+                branch_config_data = self.branch_data[
+                    (self.branch_data['pre_branch_length'] == pre_len) &
+                    (self.branch_data['post_branch_length'] == post_len)
+                ]
+
+                if len(branch_config_data) == 0:
+                    ax.text(0.5, 0.5, 'No data',
+                            ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f'Pre={pre_len}, Post={post_len}')
+                    continue
+
+                for lambda_idx, lambda_val in enumerate(lambda_values):
+                    lambda_data = branch_config_data[branch_config_data['lambda'] == lambda_val]
+
+                    if len(lambda_data) == 0:
+                        continue
+
+                    # Compute memory call probability from entropy
+                    lambda_data = lambda_data.copy()
+                    lambda_data['memory_call_prob'] = sigmoid(
+                        (lambda_data['mean_policy_entropy'] - tau) / temperature
+                    )
+
+                    # Group by episode and compute statistics
+                    grouped = lambda_data.groupby('episode')['memory_call_prob'].agg(['mean', 'std', 'count'])
+                    episodes = grouped.index.to_numpy()
+                    mean = grouped['mean']
+                    std = grouped['std'].fillna(0)
+                    n = grouped['count']
+                    ci = 1.96 * std / np.sqrt(n)
+
+                    # Smooth
+                    mean_smooth = self._running_average(mean, window)
+                    ci_smooth = self._running_average(ci, window)
+
+                    color = LAMBDA_COLORS[lambda_idx % len(LAMBDA_COLORS)]
+                    ax.plot(episodes, mean_smooth, label=f'λ={lambda_val:.1f}',
+                            color=color, linewidth=1.5, alpha=0.8)
+                    ax.fill_between(episodes, mean_smooth - ci_smooth, mean_smooth + ci_smooth,
+                                    color=color, alpha=0.15)
+
+                ax.set_xlabel('Episode')
+                ax.set_ylabel(f'Memory Call Prob\n({window}-ep avg)')
+                ax.set_title(f'Pre={pre_len}, Post={post_len}')
+                ax.grid(alpha=0.3, linewidth=0.5)
+                ax.set_ylim(-0.05, 1.05)
+                if pre_idx == 0 and post_idx == 2:  # Top right for legend
+                    ax.legend(ncol=2, fontsize=8)
+
+        plt.tight_layout()
+        self._save_fig(fig, 'memory_call_probability_evolution', subdir)
+        plt.close()
+
     def plot_all_corridor(self):
         """Generate all corridor topology plots."""
         print("\n" + "="*80)
@@ -861,16 +1043,19 @@ class ElementaryTopologyPlotter:
             return
 
         # Generate plots
-        print("\n[1/4] Learning Curves...")
+        print("\n[1/5] Learning Curves...")
         self.plot_corridor_learning_curves()
 
-        print("\n[2/4] Effective Credit Distance...")
+        print("\n[2/5] Effective Credit Distance...")
         self.plot_effective_credit_distance()
 
-        print("\n[3/4] Area Under Success Rate Curve...")
+        print("\n[3/5] Area Under Success Rate Curve...")
         self.plot_auc_vs_lambda()
 
-        print("\n[4/4] Value Estimates Per Node...")
+        print("\n[4/5] Memory Call Probability Evolution...")
+        self.plot_corridor_entropy_evolution()
+
+        print("\n[5/5] Value Estimates Per Node...")
         self.plot_value_estimates_per_node()
 
         print("\n" + "="*80)
@@ -963,9 +1148,9 @@ class ElementaryTopologyPlotter:
                 for j in range(len(self.branch_post_lengths)):
                     best_lambda_map[i, j] = lambda_values[best_lambda_idx[i, j]]
 
-            # Plot heatmap
+            # Plot heatmap (origin='upper' so pre-branch length increases going down)
             im = ax.imshow(best_lambda_map, cmap='plasma', aspect='auto',
-                          vmin=0, vmax=1.0, origin='lower')
+                          vmin=0, vmax=1.0, origin='upper')
 
             # Annotate with actual lambda values
             for i in range(len(self.branch_pre_lengths)):
@@ -1186,14 +1371,17 @@ class ElementaryTopologyPlotter:
             return
 
         # Generate plots
-        print("\n[1/3] Learning Curves...")
+        print("\n[1/4] Learning Curves...")
         self.plot_branch_learning_curves(training_scheme)
 
-        print("\n[2/3] Effective Credit Distance...")
+        print("\n[2/4] Effective Credit Distance...")
         self.plot_branch_effective_credit_distance(training_scheme)
 
-        print("\n[3/3] Area Under Reward Curve...")
+        print("\n[3/4] Area Under Reward Curve...")
         self.plot_branch_auc_vs_lambda(training_scheme)
+
+        print("\n[4/4] Memory Call Probability Evolution...")
+        self.plot_branch_entropy_evolution(training_scheme)
 
         print("\n" + "="*80)
         print(f"All figures saved to: {self.output_dir}/branch/{training_scheme}/")
@@ -1212,7 +1400,7 @@ def main():
     parser.add_argument('--output-dir', type=str, default='elementary_topology_plots',
                        help='Output directory for figures (default: elementary_topology_plots/)')
     parser.add_argument('--topology-family', type=str, default='corridor',
-                       help='Topology family to plot. Options: corridor, branch_alternating, branch_switch, regime_shift (default: corridor)')
+                       help='Topology family to plot. Options: corridor, branch_alternating, branch_switch, branch_stagnant, regime_shift (default: corridor)')
 
     args = parser.parse_args()
 
@@ -1224,7 +1412,7 @@ def main():
         plotter.plot_all_corridor()
         print("\n✓ Plotting complete!")
         print(f"  View figures in: {plotter.output_dir}/corridor/")
-    elif args.topology_family in ['branch_alternating', 'branch_switch']:
+    elif args.topology_family in ['branch_alternating', 'branch_switch', 'branch_stagnant']:
         plotter.plot_all_branch(args.topology_family)
         print("\n✓ Plotting complete!")
         print(f"  View figures in: {plotter.output_dir}/branch/{args.topology_family}/")
@@ -1234,7 +1422,7 @@ def main():
         print(f"  View figures in: {plotter.output_dir}/branch/")
     else:
         print(f"Error: Unknown topology family '{args.topology_family}'")
-        print("Available families: corridor, branch_alternating, branch_switch, regime_shift")
+        print("Available families: corridor, branch_alternating, branch_switch, branch_stagnant, regime_shift")
         return
 
 

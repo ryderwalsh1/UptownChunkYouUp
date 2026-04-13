@@ -751,7 +751,7 @@ class LambdaExperimentPlotter:
         opt_df['corridor_param'] = opt_df['topology'].str.extract(r'([\d.]+)').astype(float)
 
         # Define corridor-dominated regime threshold
-        CORRIDOR_THRESHOLD = 0.6
+        CORRIDOR_THRESHOLD = 0.0
         opt_df['regime'] = opt_df['corridor_param'].apply(
             lambda x: 'corridor-dominated' if x >= CORRIDOR_THRESHOLD else 'junction-dominated'
         )

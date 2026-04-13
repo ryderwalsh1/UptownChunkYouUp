@@ -33,7 +33,7 @@ import networkx as nx
 import torch.nn.functional as F
 
 
-def run_single_configuration(topology_name, lambda_val, seed, config):
+def run_single_configuration(topology_name, lambda_val, seed, config, training_scheme=None):
     """
     Run training for a single (topology, λ, seed) configuration.
 
@@ -49,6 +49,10 @@ def run_single_configuration(topology_name, lambda_val, seed, config):
         Random seed
     config : dict
         Experiment configuration containing hyperparameters
+    training_scheme : str, optional
+        Training scheme for goal selection:
+        - 'alternating': Randomly sample dead-end goals each episode (default)
+        - 'switching': Allocate consecutive episodes to each dead-end
 
     Returns:
     --------
@@ -142,8 +146,20 @@ def run_single_configuration(topology_name, lambda_val, seed, config):
     for episode in tqdm(range(num_episodes),
                        desc=f"{topology_name} λ={lambda_val:.1f} seed={seed}",
                        leave=False):
-        # Reset environment
-        state = env.reset()
+        # Handle goal selection based on training scheme
+        if training_scheme == 'switching' and len(env.deadend_nodes) > 0:
+            # Switching scheme: allocate consecutive episodes to each dead-end
+            num_dead_ends = len(env.deadend_nodes)
+            episodes_per_deadend = num_episodes // num_dead_ends
+            deadend_idx = min(episode // episodes_per_deadend, num_dead_ends - 1)
+            goal_node = env.deadend_nodes[deadend_idx]
+
+            # Reset with fixed goal
+            state = env.reset(goal_pos=goal_node)
+        else:
+            # Alternating scheme (default): random sampling
+            state = env.reset()
+
         network.reset_hidden(batch_size=1)
 
         # Compute path-dependent topology metrics for this start-goal pair
@@ -346,6 +362,7 @@ def run_single_configuration(topology_name, lambda_val, seed, config):
             'lambda': lambda_val,
             'seed': seed,
             'episode': episode,
+            'training_scheme': training_scheme if training_scheme else 'alternating',
             # Episode metrics
             'episode_reward': episode_reward,
             'episode_length': episode_length,
@@ -639,9 +656,12 @@ class LambdaExperiment:
         print(f"  Output directory: {self.output_dir}")
         print()
 
+        # Get training scheme from config
+        training_scheme = self.config.get('training_scheme', 'alternating')
+
         # Create list of all configurations to run in parallel
         configs_to_run = [
-            (topology_name, lambda_val, seed, self.config)
+            (topology_name, lambda_val, seed, self.config, training_scheme)
             for topology_name in self.topologies
             for lambda_val in self.lambda_values
             for seed in self.seeds
@@ -820,16 +840,17 @@ def main():
             '0.9 corridor',
             '1.0 corridor',
         ],
-        'lr': 3e-4,
+        'lr': 'adaptive',
         'gamma': 0.99,
         'entropy_coef': 0.01,
-        'teacher_coef': 10.0, 
+        'teacher_coef': 10.0,
         'value_coef': 0.5,
         'tau': 0.6,  # Fixed value - threshold entropy for memory consultation
         'consultation_temperature': 0.5,  # Temperature for sigmoid gating
         'hard_teacher_force': False,  # Whether to correct wrong policy samples
         'memory_consultation_cost': 0.0,  # Reward penalty for consulting memory
         'memory_correction_cost': 0.0,  # Reward penalty for being corrected by memory
+        'training_scheme': 'switching',  # 'alternating' (random) or 'switching' (consecutive blocks)
         'output_dir': f'lambda_experiment_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
     }
 

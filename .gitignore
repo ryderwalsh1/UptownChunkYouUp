@@ -25,6 +25,11 @@ smallgridsweep_figures_20j/
 hyperparameter_interpolation/
 elementary_topology_results/
 elementary_topology_plots/
+figures_switching_adaptive/
+fixed_lambda_baseline_results_*/
+adaptive_lambda_results_*/
+comparison_plots/
+trajectory_videos/
 
 # pnl
 pnl-show_graph-output/

@@ -458,7 +458,7 @@ def make_tree(depth, branching_factor=2, seed=None):
     - RIGHT: Move to right child (down one level)
     - DOWN: Move to middle child (down one level, only for branching_factor=3)
 
-    Tree layout ensures all parent-child connections are exactly 1 step in Manhattan distance.
+    Tree layout uses exponential spacing (2^(depth-1)) to prevent coordinate collisions.
 
     Parameters:
     -----------
@@ -480,10 +480,10 @@ def make_tree(depth, branching_factor=2, seed=None):
     graph = nx.Graph()
 
     # Build tree level by level
-    # Each child is positioned relative to parent:
-    # - Left child: (parent_x - 1, parent_y + 1)
-    # - Right child: (parent_x + 1, parent_y + 1)
-    # - Middle child (if branching_factor=3): (parent_x, parent_y + 1)
+    # Use wide spacing to prevent coordinate collisions in deeper trees
+    # Calculate spacing needed: for depth d, we need at least 2^(d-1) horizontal space
+    # Use 2^(depth-1) spacing to ensure no subtree overlaps
+    spacing = 2 ** (depth - 1)
 
     level_nodes = {}  # level -> list of (x, y) nodes at that level
 
@@ -497,22 +497,26 @@ def make_tree(depth, branching_factor=2, seed=None):
         level_nodes[level + 1] = []
         current_level = level_nodes[level]
 
+        # Calculate spacing for this level: how far apart should children be?
+        # Each node's subtree needs 2^(depth - level - 2) horizontal space
+        level_spacing = spacing // (2 ** (level + 1))
+
         for parent_node in current_level:
             parent_x, parent_y = parent_node
 
             # Create children based on branching factor
             if branching_factor == 2:
-                # Left and right children
+                # Left and right children with appropriate spacing
                 children = [
-                    (parent_x - 1, parent_y + 1),  # Left child
-                    (parent_x + 1, parent_y + 1),  # Right child
+                    (parent_x - level_spacing, parent_y + 1),  # Left child
+                    (parent_x + level_spacing, parent_y + 1),  # Right child
                 ]
             elif branching_factor == 3:
-                # Left, middle, and right children
+                # Left, middle, and right children with appropriate spacing
                 children = [
-                    (parent_x - 1, parent_y + 1),  # Left child
-                    (parent_x, parent_y + 1),      # Middle child (DOWN action)
-                    (parent_x + 1, parent_y + 1),  # Right child
+                    (parent_x - level_spacing, parent_y + 1),  # Left child
+                    (parent_x, parent_y + 1),                   # Middle child (DOWN action)
+                    (parent_x + level_spacing, parent_y + 1),  # Right child
                 ]
 
             # Add children to graph

@@ -55,6 +55,7 @@ def run_single_configuration(topology_name, lambda_val, seed, config, training_s
         Training scheme to use for branch topologies:
         - 'branch_alternating': Alternate between two branch goals (like dead_end_goal)
         - 'branch_switch': Train on one branch, then switch to the other
+        - 'branch_stagnant': Train only on one branch endpoint throughout (other branch ignored)
         - None: Use default curated pairs
 
     Returns:
@@ -115,8 +116,10 @@ def run_single_configuration(topology_name, lambda_val, seed, config, training_s
         # Fallback: if no curated pairs, use all dead-end pairs
         curated_pairs = None
 
-    # Override curated pairs for branch topology training schemes
+    # Override curated pairs for branch/tree topology training schemes
     is_branch_topology = 'branch_pre' in topology_name
+    is_tree_topology = 'tree_d' in topology_name
+
     if is_branch_topology and training_scheme is not None:
         # Extract branch parameters from topology name
         # e.g., 'branch_pre5_post5' -> pre=5, post=5
@@ -138,6 +141,37 @@ def run_single_configuration(topology_name, lambda_val, seed, config, training_s
             # We'll handle this in the training loop (single pair, but we'll switch midway)
             curated_pairs = [(start_node, branch1_goal)]  # Start with branch 1
             switch_episode = num_episodes // 2  # Store for later use
+        elif training_scheme == 'branch_stagnant':
+            # Train only on one branch endpoint (right branch) throughout
+            curated_pairs = [(start_node, branch1_goal)]
+        else:
+            # Keep default curated pairs
+            pass
+
+    elif is_tree_topology and training_scheme is not None:
+        # For tree topologies, extract leaf nodes from the maze's curated pairs
+        # (The maze already generated all root->leaf pairs correctly)
+        root = (0, 0)
+
+        # Get all leaf nodes from the maze's start_goal_pairs
+        # All pairs are (root, leaf), so extract the leaf nodes
+        leaf_nodes = [goal for start, goal in curated_pairs]
+
+        # Sort leaves left to right by x coordinate
+        leaf_nodes.sort(key=lambda node: node[0])
+
+        if training_scheme == 'branch_alternating':
+            # Interleave all leaf nodes (cycle through all leaves each episode)
+            curated_pairs = [(root, leaf) for leaf in leaf_nodes]
+        elif training_scheme == 'branch_switch':
+            # Switch between each leaf at regular intervals
+            # Start with first leaf, will switch in training loop
+            curated_pairs = [(root, leaf_nodes[0])]
+            switch_interval = num_episodes // len(leaf_nodes)
+            switch_leaf_nodes = leaf_nodes  # Store for later use
+        elif training_scheme == 'branch_stagnant':
+            # Train only on first (leftmost) leaf throughout
+            curated_pairs = [(root, leaf_nodes[0])]
         else:
             # Keep default curated pairs
             pass
@@ -178,6 +212,13 @@ def run_single_configuration(topology_name, lambda_val, seed, config, training_s
         if is_branch_topology and training_scheme == 'branch_switch' and episode == switch_episode:
             # Switch to branch 2
             curated_pairs = [(start_node, branch2_goal)]
+
+        # Handle tree_switch scheme: switch between leaf nodes at regular intervals
+        if is_tree_topology and training_scheme == 'branch_switch':
+            # Determine which leaf to target based on current episode
+            leaf_idx = episode // switch_interval
+            if leaf_idx < len(switch_leaf_nodes):
+                curated_pairs = [(root, switch_leaf_nodes[leaf_idx])]
 
         # Reset environment with curated start-goal pairs
         if curated_pairs is not None:
@@ -252,6 +293,8 @@ def run_single_configuration(topology_name, lambda_val, seed, config, training_s
             consultation_logit = (policy_entropy - tau) / consultation_temperature
             consultation_prob = torch.sigmoid(torch.tensor(consultation_logit)).item()
             consult_memory = np.random.random() < consultation_prob
+            # set to false to disable memory consultation
+            consult_memory = False  # NEW: Disable memory consultation for this experiment
 
             # Get optimal action from memory for potential use
             state_idx = state_encoding.argmax().item()
@@ -477,6 +520,7 @@ class ElementaryTopologyExperiment:
             - seeds: list of random seeds
             - num_episodes: number of training episodes per run
             - topologies: list of topology names to test
+            - training_schemes: list of training schemes to run for branch topologies (default: all)
             - lr: learning rate
             - gamma: discount factor
             - entropy_coef: entropy regularization coefficient
@@ -491,6 +535,7 @@ class ElementaryTopologyExperiment:
         self.seeds = config['seeds']
         self.num_episodes = config['num_episodes']
         self.topologies = config['topologies']
+        self.training_schemes = config.get('training_schemes', ['branch_alternating', 'branch_switch', 'branch_stagnant'])
         self.lr = config.get('lr', 3e-4)
         self.gamma = config.get('gamma', 0.99)
         self.entropy_coef = config.get('entropy_coef', 0.01)
@@ -528,17 +573,18 @@ class ElementaryTopologyExperiment:
         # Create list of all configurations to run in parallel
         configs_to_run = []
         for topology_name in self.topologies:
-            # Check if this is a branch topology
+            # Check if this is a branch or tree topology
             is_branch_topology = 'branch_pre' in topology_name
+            is_tree_topology = 'tree_d' in topology_name
 
-            if is_branch_topology:
-                # For branch topologies, run both training schemes
-                for training_scheme in ['branch_alternating', 'branch_switch']:
+            if is_branch_topology or is_tree_topology:
+                # For branch/tree topologies, run specified training schemes
+                for training_scheme in self.training_schemes:
                     for lambda_val in self.lambda_values:
                         for seed in self.seeds:
                             configs_to_run.append((topology_name, lambda_val, seed, self.config, training_scheme))
             else:
-                # For non-branch topologies, use default scheme
+                # For other topologies, use default scheme
                 for lambda_val in self.lambda_values:
                     for seed in self.seeds:
                         configs_to_run.append((topology_name, lambda_val, seed, self.config, None))
@@ -737,6 +783,10 @@ def main():
     --episodes : int
         Number of training episodes per run.
         Default: 3000
+    --training-schemes : str
+        Training schemes to run for branch topologies (comma-separated).
+        Options: 'branch_alternating', 'branch_switch', 'branch_stagnant', 'all'
+        Default: 'all' (runs all three schemes)
     --list : flag
         List all available topologies and exit.
 
@@ -750,6 +800,12 @@ def main():
 
     # Train with specific lambda values
     python run_elementary_topology_experiment.py --topology branch_pre5_post5 --lambdas 0.0,0.5,1.0
+
+    # Train only the stagnant scheme (skip alternating and switch)
+    python run_elementary_topology_experiment.py --topology branch_pre5_post5 --training-schemes branch_stagnant
+
+    # Train specific combinations of schemes
+    python run_elementary_topology_experiment.py --topology branch_pre8_post8 --training-schemes branch_switch,branch_stagnant
 
     # List all available topologies
     python run_elementary_topology_experiment.py --list
@@ -771,6 +827,10 @@ def main():
                         help='Comma-separated random seeds')
     parser.add_argument('--episodes', type=int, default=500,
                         help='Number of training episodes per run')
+    parser.add_argument('--training-schemes', type=str, default='all',
+                        help='Training schemes to run for branch topologies (comma-separated). '
+                             'Options: branch_alternating, branch_switch, branch_stagnant, all. '
+                             'Default: all. Example: --training-schemes branch_stagnant')
     parser.add_argument('--list', action='store_true',
                         help='List all available topologies and exit')
 
@@ -804,6 +864,19 @@ def main():
 
     # Parse seeds
     seeds = [int(x.strip()) for x in args.seeds.split(',')]
+
+    # Parse training schemes
+    if args.training_schemes.lower() == 'all':
+        training_schemes = ['branch_alternating', 'branch_switch', 'branch_stagnant']
+    else:
+        training_schemes = [x.strip() for x in args.training_schemes.split(',')]
+        # Validate training schemes
+        valid_schemes = ['branch_alternating', 'branch_switch', 'branch_stagnant']
+        for scheme in training_schemes:
+            if scheme not in valid_schemes:
+                print(f"Error: Invalid training scheme '{scheme}'")
+                print(f"Valid options: {', '.join(valid_schemes)}, all")
+                return
 
     # Determine which topologies to run
     if args.topology:
@@ -839,6 +912,7 @@ def main():
             'seeds': seeds,
             'num_episodes': args.episodes,
             'topologies': [topology_name],  # Single topology per run
+            'training_schemes': training_schemes,  # NEW: Which training schemes to run
             'lr': 3e-4,
             'gamma': 0.99,
             'entropy_coef': 0.01,
