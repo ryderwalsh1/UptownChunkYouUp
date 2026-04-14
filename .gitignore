@@ -30,6 +30,7 @@ fixed_lambda_baseline_results_*/
 adaptive_lambda_results_*/
 comparison_plots/
 trajectory_videos/
+adaptive_lambda_results/
 
 # pnl
 pnl-show_graph-output/

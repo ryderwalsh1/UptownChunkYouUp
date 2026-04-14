@@ -623,9 +623,19 @@ class ComparisonPlotter:
                        label='Adaptive λ', marker='o', markevery=len(episodes)//10,
                        markersize=4)
 
+            # Set title with junction density
+            if corridor == 0.0:
+                junction_density = 0.40
+            elif corridor == 0.5:
+                junction_density = 0.20
+            elif corridor == 1.0:
+                junction_density = 0.12
+            else:
+                junction_density = None
+
             ax.set_xlabel('Episode')
             ax.set_ylabel('Episode Reward')
-            ax.set_title(f'Corridor = {corridor}')
+            ax.set_title(f'Junction Density = {junction_density:.2f}')
             ax.grid(alpha=0.3)
             if idx == 2:
                 ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
@@ -677,7 +687,16 @@ class ComparisonPlotter:
                 ax.set_xlabel('Episode')
                 ax.set_ylabel(label)
                 if row_idx == 0:
-                    ax.set_title(f'Corridor = {corridor}')
+                    # Set title with junction density
+                    if corridor == 0.0:
+                        junction_density = 0.40
+                    elif corridor == 0.5:
+                        junction_density = 0.20
+                    elif corridor == 1.0:
+                        junction_density = 0.12
+                    else:
+                        junction_density = None
+                    ax.set_title(f'Junction Density = {junction_density:.2f}')
                 ax.grid(alpha=0.3)
 
         plt.tight_layout()
@@ -726,7 +745,16 @@ class ComparisonPlotter:
                 ax.set_xlabel('Episode')
                 ax.set_ylabel(label)
                 if row_idx == 0:
-                    ax.set_title(f'Corridor = {corridor}')
+                    # Set title with junction density
+                    if corridor == 0.0:
+                        junction_density = 0.40
+                    elif corridor == 0.5:
+                        junction_density = 0.20
+                    elif corridor == 1.0:
+                        junction_density = 0.12
+                    else:
+                        junction_density = None
+                    ax.set_title(f'Junction Density = {junction_density:.2f}')
                 ax.grid(alpha=0.3)
 
         plt.tight_layout()
@@ -737,15 +765,16 @@ class ComparisonPlotter:
 
     def plot_policy_metrics(self):
         """Plot policy metrics grid."""
-        fig, axes = plt.subplots(3, 3, figsize=(18, 14))
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         lambda_values = np.arange(0, 1.1, 0.1)
         colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(lambda_values)))
 
-        # For baseline: consultation_rate, mean_policy_entropy, correction_rate
-        # For adaptive: mean_p_slow, mean_fast_entropy, (no correction)
-        baseline_metrics = ['consultation_rate', 'mean_policy_entropy', 'correction_rate']
-        adaptive_metrics_keys = ['mean_p_slow', 'mean_fast_entropy', 'correction_rate']
-        metric_labels = ['Memory Usage (Consultation/p_slow)', 'Policy Entropy', 'Correction Rate']
+        # For baseline: consultation_rate, mean_policy_entropy
+        # For adaptive: p_slow, mean_fast_entropy
+        # Note: correction_rate removed as adaptive doesn't compute it
+        baseline_metrics = ['consultation_rate', 'mean_policy_entropy']
+        adaptive_metrics_keys = ['p_slow', 'mean_fast_entropy']
+        metric_labels = ['Memory Usage (Consultation/p_slow)', 'Policy Entropy']
 
         for row_idx, (baseline_metric, adaptive_metric, label) in enumerate(
                 zip(baseline_metrics, adaptive_metrics_keys, metric_labels)):
@@ -777,7 +806,16 @@ class ComparisonPlotter:
                 ax.set_xlabel('Episode')
                 ax.set_ylabel(label)
                 if row_idx == 0:
-                    ax.set_title(f'Corridor = {corridor}')
+                    # Set title with junction density
+                    if corridor == 0.0:
+                        junction_density = 0.40
+                    elif corridor == 0.5:
+                        junction_density = 0.20
+                    elif corridor == 1.0:
+                        junction_density = 0.12
+                    else:
+                        junction_density = None
+                    ax.set_title(f'Junction Density = {junction_density:.2f}')
                 ax.grid(alpha=0.3)
 
         plt.tight_layout()

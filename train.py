@@ -18,11 +18,19 @@ from tqdm import tqdm
 import os
 import json
 from datetime import datetime
+import networkx as nx
+import torch.nn.functional as F
 
 from maze_env import MazeEnvironment
 from agent import CognitiveAgent
 from fast import FastNetworkTrainer
 from controller import MetaControllerTrainer
+from lambda_experiment.evaluation_metrics import (
+    compute_junction_decision_accuracy,
+    compute_junction_action_entropy,
+    compute_junction_policy_margin,
+    compute_wrong_turn_rate
+)
 
 
 class Stage1Trainer:
@@ -275,11 +283,22 @@ class Stage2Trainer:
             'control_dones': [],
 
             # For analysis
-            'step_info': []
+            'step_info': [],
+            'node_sequence': [],
+            'action_probs': []
         }
 
         episode_reward = 0.0
         success = False
+        graph = self.env.graph
+
+        # Get shortest path for junction metrics
+        start_node = state['current_pos']
+        goal_node = state['goal_pos']
+        if nx.has_path(graph, start_node, goal_node):
+            shortest_path = nx.shortest_path(graph, start_node, goal_node)
+        else:
+            shortest_path = []
 
         for step in range(max_steps):
             # Get state encoding
@@ -288,6 +307,10 @@ class Stage2Trainer:
 
             # Full agent step
             step_info = self.agent.step(state_encoding, goal_encoding, temperature=temperature)
+
+            # Compute action probabilities for junction metrics
+            action_logits = step_info['fast_logits'] if not step_info['used_slow'] else step_info['slow_logits']
+            action_probs = F.softmax(action_logits, dim=-1).squeeze().detach().cpu().numpy()
 
             # Take environment step
             next_state, reward, done, info = self.env.step(
@@ -330,6 +353,8 @@ class Stage2Trainer:
 
             # Store full step info for analysis
             trajectory['step_info'].append(step_info)
+            trajectory['node_sequence'].append(state['current_pos'])
+            trajectory['action_probs'].append(action_probs)
 
             episode_reward += reward
             state = next_state
@@ -353,7 +378,46 @@ class Stage2Trainer:
         trajectory['next_goal'] = final_goal_encoding
         # Note: No next_memory needed since slow memory is not trained
 
-        return trajectory, episode_reward, len(trajectory['control_states']), success
+        # Compute junction metrics
+        episode_length = len(trajectory['control_states'])
+        optimal_path_length = len(shortest_path) - 1 if len(shortest_path) > 1 else 1
+
+        junction_metrics = {}
+        if len(shortest_path) > 0:
+            junction_acc = compute_junction_decision_accuracy(
+                {'node_sequence': trajectory['node_sequence']}, graph, shortest_path
+            )
+            junction_metrics.update(junction_acc)
+
+            junction_entropy = compute_junction_action_entropy(
+                {'node_sequence': trajectory['node_sequence']}, graph, trajectory['action_probs']
+            )
+            junction_metrics.update(junction_entropy)
+
+            junction_margin = compute_junction_policy_margin(
+                {'node_sequence': trajectory['node_sequence']}, graph, trajectory['action_probs']
+            )
+            junction_metrics.update(junction_margin)
+
+            wrong_turn = compute_wrong_turn_rate(
+                {'node_sequence': trajectory['node_sequence']}, graph, shortest_path
+            )
+            junction_metrics['wrong_turn_rate'] = wrong_turn
+
+        # Add metrics to return
+        episode_metrics = {
+            'episode_reward': episode_reward,
+            'episode_length': episode_length,
+            'success': success,
+            'optimal_path_length': optimal_path_length,
+            'optimality_ratio': episode_length / optimal_path_length if optimal_path_length > 0 else -1,
+            'junction_accuracy': junction_metrics.get('junction_accuracy', np.nan),
+            'mean_junction_entropy': junction_metrics.get('mean_junction_entropy', np.nan),
+            'mean_junction_margin': junction_metrics.get('mean_junction_margin', np.nan),
+            'wrong_turn_rate': junction_metrics.get('wrong_turn_rate', np.nan),
+        }
+
+        return trajectory, episode_metrics
 
     def train_step(self, trajectory):
         """
@@ -435,6 +499,11 @@ class Stage2Trainer:
             'episode_rewards': [],
             'episode_lengths': [],
             'success_rate': [],
+            'optimality_ratio': [],
+            'junction_accuracy': [],
+            'mean_junction_entropy': [],
+            'mean_junction_margin': [],
+            'wrong_turn_rate': [],
             'p_slow': [],
             'p_fast': [],
             'mean_lambda': [],
@@ -470,7 +539,7 @@ class Stage2Trainer:
                 temperature = 1.0
 
             # Collect trajectory
-            trajectory, episode_reward, episode_length, success = self.collect_trajectory(
+            trajectory, episode_metrics = self.collect_trajectory(
                 temperature=temperature
             )
 
@@ -499,10 +568,17 @@ class Stage2Trainer:
             # Compute mean delta (advantage)
             mean_delta = np.mean([info['delta'].item() for info in step_infos])
 
-            # Log metrics
-            metrics['episode_rewards'].append(episode_reward)
-            metrics['episode_lengths'].append(episode_length)
-            metrics['success_rate'].append(1.0 if success else 0.0)
+            # Log metrics from episode_metrics
+            metrics['episode_rewards'].append(episode_metrics['episode_reward'])
+            metrics['episode_lengths'].append(episode_metrics['episode_length'])
+            metrics['success_rate'].append(1.0 if episode_metrics['success'] else 0.0)
+            metrics['optimality_ratio'].append(episode_metrics['optimality_ratio'])
+            metrics['junction_accuracy'].append(episode_metrics['junction_accuracy'])
+            metrics['mean_junction_entropy'].append(episode_metrics['mean_junction_entropy'])
+            metrics['mean_junction_margin'].append(episode_metrics['mean_junction_margin'])
+            metrics['wrong_turn_rate'].append(episode_metrics['wrong_turn_rate'])
+
+            # Log computed metrics
             metrics['p_slow'].append(mean_p_slow)
             metrics['p_fast'].append(mean_p_fast)
             metrics['mean_lambda'].append(mean_lambda)
@@ -910,6 +986,57 @@ def plot_conflict_map_heatmap(agent, maze, save_path='conflict_map_heatmap.png')
     print(f"Conflict map heatmap saved to {save_path}")
 
 
+def save_metrics_for_comparison(metrics, corridor_value, output_dir='adaptive_lambda_results'):
+    """
+    Save metrics in JSON format compatible with train_and_plot_adaptive_lambda_comparison.py.
+
+    Parameters:
+    -----------
+    metrics : dict
+        Training metrics from Stage2Trainer.train()
+    corridor_value : float
+        Corridor parameter value (0.0, 0.5, or 1.0)
+    output_dir : str
+        Base output directory (will create corridor subdirectories)
+    """
+    from pathlib import Path
+
+    # Create output directory
+    results_dir = Path(output_dir)
+    results_dir.mkdir(exist_ok=True, parents=True)
+
+    corridor_dir = results_dir / f'corridor_{corridor_value:.1f}'
+    corridor_dir.mkdir(exist_ok=True)
+
+    # Convert metrics to JSON-serializable format
+    metrics_serializable = {}
+    for key, value in metrics.items():
+        if key == 'lambda_values':
+            # Skip nested list of all lambda values (not needed for plotting)
+            continue
+        elif key == 'losses':
+            # Skip loss dict (complex structure)
+            continue
+        elif isinstance(value, list):
+            # Convert numpy types to native Python types
+            metrics_serializable[key] = [
+                float(v) if not (isinstance(v, float) and np.isnan(v)) else None
+                for v in value
+            ]
+        else:
+            metrics_serializable[key] = value
+
+    # Save to JSON
+    metrics_file = corridor_dir / 'metrics.json'
+    with open(metrics_file, 'w') as f:
+        json.dump(metrics_serializable, f, indent=2)
+
+    print(f"\nMetrics saved for plotting: {metrics_file}")
+    print(f"Compatible with train_and_plot_adaptive_lambda_comparison.py --plot-only")
+
+    return metrics_file
+
+
 if __name__ == "__main__":
     print("Training Cognitive Agent")
     print("=" * 70)
@@ -922,18 +1049,18 @@ if __name__ == "__main__":
     goal_is_deadend = True      # True = goals always at dead-ends, False = random goals
     length = 8
     width = 8
-    corridor = 0.0
+    corridor = 1.0  # CHANGE THIS: Run 3 times with corridor = 0.0, 0.5, 1.0
     seed = 60
 
     num_episodes_stage2 = 10000
     log_interval = num_episodes_stage2 // 100
-    save_interval = num_episodes_stage2 // 1
+    save_interval = num_episodes_stage2 // 10
 
     lr_fast = 3e-4
     lr_controller = 1e-3
     gamma = 0.99
 
-    control_cost = 0.15
+    control_cost = 0.1
     conflict_alpha = 0.05
     lambda_beta = 2.0
     w_long = 0.8
@@ -1034,6 +1161,9 @@ if __name__ == "__main__":
     # Plot conflict map heatmap
     plot_conflict_map_heatmap(agent, maze, save_path=f'{save_dir}/conflict_map_heatmap.png')
 
+    # Save metrics for comparison plotting
+    save_metrics_for_comparison(stage2_metrics, corridor_value=corridor, output_dir='adaptive_lambda_results')
+
     # Print final statistics
     print("\n" + "=" * 70)
     print("FINAL AGENT STATISTICS")
@@ -1044,3 +1174,7 @@ if __name__ == "__main__":
             print(f"  {key}: {value}")
 
     print("\n✓ Training complete!")
+    print(f"\nTo plot comparison with fixed lambda baseline, run:")
+    print(f"python train_and_plot_adaptive_lambda_comparison.py --plot-only \\")
+    print(f"  --results-dir adaptive_lambda_results \\")
+    print(f"  --baseline-dir <fixed_lambda_baseline_dir>")
