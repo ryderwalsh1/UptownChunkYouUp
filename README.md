@@ -56,7 +56,6 @@ The system learns to balance reward maximization, processing efficiency, and cog
 │
 ├── docs/                       # Documentation & figures
 │   ├── implementation.md       # Detailed architecture specification
-│   ├── fast_state_entropy_explanation.md
 │   ├── agent_architecture.png
 │   ├── lambda_modulation_curves.png
 │   ├── elementary_topologies.png
@@ -194,7 +193,6 @@ The agent operates in graph-structured mazes:
 
 - **[docs/implementation.md](docs/implementation.md)**: Complete architecture specification
 - **[CLAUDE.md](CLAUDE.md)**: Developer guidance for working with this codebase
-- **[docs/fast_state_entropy_explanation.md](docs/fast_state_entropy_explanation.md)**: Explanation of confidence signals
 
 ## Training Details
 
