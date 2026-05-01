@@ -11,38 +11,14 @@ __pycache__/
 *.egg
 *.egg-info/
 
+# All generated outputs (consolidated)
+outputs/
 
-# results
-results/
-lambda_experiment_results*/
-figures/
-figures_adaptivelr/
-figures_lr3e-4/
-test_figures/
-smallgridsweep/
-smallgridsweep_figures_7j/
-smallgridsweep_figures_20j/
-hyperparameter_interpolation/
-elementary_topology_results/
-elementary_topology_plots/
-figures_switching_adaptive/
-fixed_lambda_baseline_results_*/
-adaptive_lambda_results_*/
-comparison_plots/
-trajectory_videos/
-adaptive_lambda_results/
-
-# pnl
-pnl-show_graph-output/
-
-# legacy
+# Legacy code (archived)
 legacy/
 
-# checkpoints
-checkpoints/
-
-# videos
-trajectory\ videos/
-
-# markdowns
-*.md
+# Temporary/system files
+.DS_Store
+*.swp
+*.swo
+*~
